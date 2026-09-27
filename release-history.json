@@ -1,0 +1,337 @@
+{
+  "archivedAt": "2026-09-27",
+  "repository": "UsotsukiKaze/UsoShelf",
+  "source": "https://apps.usotsuki-kaze.com/api/apps",
+  "sourceCodeAvailable": false,
+  "notice": "历史二进制原包补档。历史标签指向独立的归档说明提交，不含当时应用源码；不要使用 GitHub 自动生成的 Source code 压缩包安装或构建旧版。",
+  "releases": [
+    {
+      "version": "1.0.0",
+      "tag": "v1.0.0",
+      "originalPublishedAt": "2026-09-07T01:24:50.577786Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "本地书架、目录与系列管理",
+        "单页、双页和自动滑动阅读模式",
+        "JM 信息查询、并行下载与连载更新检查"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.0.0-x64.exe",
+          "size": 26310857,
+          "sha256": "42778FCCB3F85E1354B86B8BF40E002059D5B2E114C3A35D006E82F646E1F327",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.0.0/jmshelf-1.0.0-setup.exe?sha256=42778FCCB3F85E13"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.0.0.zip",
+          "size": 34072830,
+          "sha256": "7280032ADF52F54F101DC020FAFB280244CD6A389D9474B2CDB0804C05AF02D2",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.0.0/jmshelf-1.0.0-portable.zip?sha256=7280032ADF52F54F"
+        }
+      ]
+    },
+    {
+      "version": "1.0.3",
+      "tag": "v1.0.3",
+      "originalPublishedAt": "2026-09-08T00:57:12.80184Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "修复下载更新后退出应用却没有完成替换和自动重启的问题",
+        "更新辅助程序增加启动确认、等待超时与失败回滚，避免更新失败后应用无法启动"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.0.3-x64.exe",
+          "size": 26321510,
+          "sha256": "1EF99A9F8D903AA0C3EB8CFDED618486CE5B8DCB08943B9B892CC3AC6C876F3B",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.0.3/jmshelf-1.0.3-setup.exe?sha256=1EF99A9F8D903AA0"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.0.3.zip",
+          "size": 33458536,
+          "sha256": "8BDA6DA587EEFEF72740929F97D8A6BE2E0DC063FE4F8C8CDFEB7FF700AE3082",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.0.3/jmshelf-1.0.3-portable.zip?sha256=8BDA6DA587EEFEF7"
+        }
+      ]
+    },
+    {
+      "version": "1.1.1",
+      "tag": "v1.1.1",
+      "originalPublishedAt": "2026-09-08T02:24:46.989342Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "添加了JM账号的收藏夹同步功能",
+        "添加了禁漫书库更新的集中弹窗展示"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.1.1-x64.exe",
+          "size": 26332546,
+          "sha256": "B9689EE51DE8BBC85F5CFFD37231C03F443167F248CB99BF0F5095D83D728170",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.1.1/jmshelf-1.1.1-setup.exe?sha256=B9689EE51DE8BBC8"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.1.1.zip",
+          "size": 34089546,
+          "sha256": "528281490925F7C81C1891E17CE759BC658F53D44658655BDD7F62C176B7ACAD",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.1.1/jmshelf-1.1.1-portable.zip?sha256=528281490925F7C8"
+        }
+      ]
+    },
+    {
+      "version": "1.2.0",
+      "tag": "v1.2.0",
+      "originalPublishedAt": "2026-09-09T12:48:31.214043Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "加入书架后自动缓存到应用内部，可直接阅读，不再触发外部下载",
+        "新增右键菜单缓存管理，可查看状态、重新缓存或清除缓存",
+        "纯净模式未开启时，详情页不再显示封面隐私设置"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.2.0-x64.exe",
+          "size": 33791465,
+          "sha256": "90B79D4A9981A5F8F66E26CF6CC2761ADC7A038085078AE03AD137E5E18CA5BD",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.0/jmshelf-1.2.0-setup.exe?sha256=90B79D4A9981A5F8"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.2.0.zip",
+          "size": 43768160,
+          "sha256": "C17D1F419AFCF4AB7D3004F36E3470EFDD8FAB763A38527416E46DF314CB64F5",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.0/jmshelf-1.2.0-portable.zip?sha256=C17D1F419AFCF4AB"
+        }
+      ]
+    },
+    {
+      "version": "1.2.1",
+      "tag": "v1.2.1",
+      "originalPublishedAt": "2026-09-09T22:57:48.052941Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "JM 收藏新增“加入书架”在线观看模式，自动补全作品信息并进入应用内缓存队列",
+        "JM 收藏详情页和右键菜单均可选择加入书架，同时保留原有下载入口"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.2.1-x64.exe",
+          "size": 33785615,
+          "sha256": "926371F362DD472E57E6CEBE77AB824D4F55A26EEB6F70E2E67320D3824423F8",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.1/jmshelf-1.2.1-setup.exe?sha256=926371F362DD472E"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.2.1.zip",
+          "size": 43768230,
+          "sha256": "75DA89858441FD698DB38CA495D0F78CBDCD43ED56B4BC01B59F2E26D1214728",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.1/jmshelf-1.2.1-portable.zip?sha256=75DA89858441FD69"
+        }
+      ]
+    },
+    {
+      "version": "1.2.2",
+      "tag": "v1.2.2",
+      "originalPublishedAt": "2026-09-10T05:35:33.432085Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "修复单话 JM 作品无法进入后续更新链路的问题，单话作品现在会保留隐藏更新订阅",
+        "优化阅读页索引缓存，避免多页作品重复扫描本地文件",
+        "增强删除安全性，批量删除失败时自动恢复文件，并阻止删除正在缓存或下载的作品",
+        "持久化下载与缓存任务状态，改善异常退出后的恢复与重试",
+        "增强应用更新回滚，只有新版窗口完成启动自检后才确认更新成功",
+        "改进开发数据迁移的原子性，并修正最低 Python 版本要求"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.2.2-x64.exe",
+          "size": 33797766,
+          "sha256": "EAFA7733D14564DFA4F03F497ABA7D16A929DCCD6A48BC917D8D73A33896F3BD",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.2/jmshelf-1.2.2-setup.exe?sha256=EAFA7733D14564DF"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.2.2.zip",
+          "size": 43778092,
+          "sha256": "D495AF17AA2FF5788EFD0FCEB2098BB339AD4B0ED82933BD51B34FBB9603D86C",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.2/jmshelf-1.2.2-portable.zip?sha256=D495AF17AA2FF578"
+        }
+      ]
+    },
+    {
+      "version": "1.2.3",
+      "tag": "v1.2.3",
+      "originalPublishedAt": "2026-09-13T07:06:48.572361Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "新增暖黄纸张质感亮色主题，可从搜索栏右侧一键切换并记住选择",
+        "保留并优化经典暗色主题，统一棕色按钮、界面层次、对比度与交互反馈"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.2.3-x64.exe",
+          "size": 33800102,
+          "sha256": "06ADFB03F480BA111E4AE465164E4D1E4FC7A3C3A02C509892D5D842DFA51A38",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.3/jmshelf-1.2.3-setup.exe?sha256=06ADFB03F480BA11"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.2.3.zip",
+          "size": 43781634,
+          "sha256": "26808E3EF8C0E6BA23D5CB95D8C64E47AFDF8DA67A6CBE2AC23781DE574CEC1C",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.3/jmshelf-1.2.3-portable.zip?sha256=26808E3EF8C0E6BA"
+        }
+      ]
+    },
+    {
+      "version": "1.2.4",
+      "tag": "v1.2.4",
+      "originalPublishedAt": "2026-09-19T23:47:05.586648Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "重新设计 JMonline：首页加入猜你喜欢、分类发现、最新上架与日/周/月榜",
+        "优化搜索交互：悬浮按钮快速切换主页、搜索与分类，建议和筛选更清晰",
+        "修复详情侧栏滚动和作品日期显示，优化启动流畅度与账号登录保持"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.2.4-x64.exe",
+          "size": 33837807,
+          "sha256": "A1FF7C37ABA77EA0052D879D4D6509F018CF66801B0963CA68259033198A0B6F",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.4/jmshelf-1.2.4-setup.exe?sha256=A1FF7C37ABA77EA0"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.2.4.zip",
+          "size": 43821399,
+          "sha256": "4989E27FD068D81384392996830E13CD11DB05A03FDEE55825EBA79E1FA7D898",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.4/jmshelf-1.2.4-portable.zip?sha256=4989E27FD068D813"
+        }
+      ]
+    },
+    {
+      "version": "1.2.5",
+      "tag": "v1.2.5",
+      "originalPublishedAt": "2026-09-20T04:45:31.847207Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "修复 JM 连接状态判断与系统代理失效时的直连回退",
+        "新增独立分类页，完整展示全部分类与分类筛选结果",
+        "补齐 JMonline 进入和页面切换动画",
+        "修复在线作品发布日期与更新时间缺失"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.2.5-x64.exe",
+          "size": 33843698,
+          "sha256": "C49451179F2DA20B84F1E103076B2963315ECE79C9607BBC2FA0273F04F32B44",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.5/jmshelf-1.2.5-setup.exe?sha256=C49451179F2DA20B"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.2.5.zip",
+          "size": 43826308,
+          "sha256": "4ACDCBC10C503E1B9C334C5630D918FF962132BDC36908E12F7849B1429A141E",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.2.5/jmshelf-1.2.5-portable.zip?sha256=4ACDCBC10C503E1B"
+        }
+      ]
+    },
+    {
+      "version": "1.3.0",
+      "tag": "v1.3.0",
+      "originalPublishedAt": "2026-09-21T00:36:28.763653Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "改善查询与后台标签预取的并发调度，缓存任务不再明显阻塞搜索",
+        "加入书架与在线预览改为渐进式缓存，前页可先阅读、后页继续后台加载",
+        "降低下载队列状态写盘频率，提升连续缓存与恢复性能",
+        "完善预览缓存清理与会话回收，避免清理正在加载或刚使用的内容",
+        "区分“移出书架”和“同时删除本地文件”，默认操作不再误删缓存"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.3.0-x64.exe",
+          "size": 33869059,
+          "sha256": "364AA01242CA704B21E84F23648553CA71E03F05AFF951804537B848E6F975B4",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.3.0/jmshelf-1.3.0-setup.exe?sha256=364AA01242CA704B"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.3.0.zip",
+          "size": 43852552,
+          "sha256": "22AC1324C7ED9D720009DBDBBCA6A745F6AF65DD2B5FB5E770451E644F58A55E",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.3.0/jmshelf-1.3.0-portable.zip?sha256=22AC1324C7ED9D72"
+        }
+      ]
+    },
+    {
+      "version": "1.3.1",
+      "tag": "v1.3.1",
+      "originalPublishedAt": "2026-09-23T00:15:01.938252Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "优化在线预览、封面和标签加载速度",
+        "改善前页渐进加载与忙时任务通道分配",
+        "完善登录持久化与本地元数据缓存"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.3.1-x64.exe",
+          "size": 33902481,
+          "sha256": "9198CC5834EA95A77C50781A14E560DFA9DF49579B5A5C1B1A30DCC9CBD6E036",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.3.1/jmshelf-1.3.1-setup.exe?sha256=9198CC5834EA95A7"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.3.1.zip",
+          "size": 43886079,
+          "sha256": "4B3DBEE31A5A5E6BC7C408FFCB63DCB919D64BB37FB9B3BCF256D08990C35E49",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.3.1/jmshelf-1.3.1-portable.zip?sha256=4B3DBEE31A5A5E6B"
+        }
+      ]
+    },
+    {
+      "version": "1.3.2",
+      "tag": "v1.3.2",
+      "originalPublishedAt": "2026-09-23T00:37:18.199004Z",
+      "channel": "stable",
+      "releaseNotes": [
+        "修复 1.3.2 启动失败并强化在线预览章节切换隔离",
+        "在线预览改为明确点击后加载，并落实预览与书架缓存容量边界",
+        "完善禁漫书库章节、日期、作品与人物标签以及已入架提示",
+        "修复推荐标签过滤持久化和 JM 登录自动恢复与退出竞态",
+        "区分阅读缓存与本地保存状态并完善右键管理"
+      ],
+      "assets": [
+        {
+          "kind": "installer",
+          "name": "JmShelf-Setup-1.3.2-x64.exe",
+          "size": 33907210,
+          "sha256": "1D1B12A8F673879BD65FAB61C628517F56AA3F9C011A95345202AD02D7ACDB29",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.3.2/jmshelf-1.3.2-setup.exe?sha256=1D1B12A8F673879B"
+        },
+        {
+          "kind": "portable",
+          "name": "JmShelf-windows-x64-1.3.2.zip",
+          "size": 43895053,
+          "sha256": "5EE9F24B91D4AACC76B8432837C01022F2B3F4E884A222F19C3C7E2539B2375A",
+          "originalUrl": "https://apps.usotsuki-kaze.com/releases/jmshelf/1.3.2/jmshelf-1.3.2-portable.zip?sha256=5EE9F24B91D4AACC"
+        }
+      ]
+    }
+  ]
+}
