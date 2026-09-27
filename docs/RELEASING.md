@@ -32,7 +32,17 @@ git push origin v1.3.4
 gh release create v1.3.4 --repo UsotsukiKaze/UsoShelf --verify-tag --draft --title "JmShelf 1.3.4" --notes-file dist/github-v1.3.4/RELEASE_NOTES.md dist/github-v1.3.4/JmShelf-Setup-1.3.4-x64.exe dist/github-v1.3.4/JmShelf-windows-x64-1.3.4.zip dist/github-v1.3.4/SHA256SUMS.txt
 ```
 
-核对草稿附件与校验值后，再将该 Release 发布为稳定版。单纯 push 代码或 tag 不会触发包体同步；草稿与预发布也不会进入稳定更新通道。上面命令是待执行步骤，不代表已经推送。
+核对草稿附件与 GitHub 返回的 SHA-256、大小后，再将该 Release 发布为稳定版：
+
+```powershell
+gh release edit v1.3.4 --repo UsotsukiKaze/UsoShelf --draft=false --latest=true
+```
+
+单纯 push 代码或 tag 不会触发包体同步；草稿与预发布也不会进入稳定更新通道。1.3.4 已于 2026-09-27 推送并发布，以上命令是后续发布流程示例。
+
+### 历史补档
+
+重要历史版本、原站日期及原包校验记录见 [历史版本索引](HISTORICAL_RELEASES.md)。补档使用原包，不重新构建；发布时显式指定 `--latest=false`，避免覆盖当前更新通道。旧源码快照不存在时，标签指向仅含说明和校验清单的独立归档提交，不得伪装成历史源码；`v1.3.4` 标签对应正常的应用源码提交。
 
 ## 新分发链路
 
@@ -47,6 +57,8 @@ KazeApps SQLite（版本、URL、大小、校验值、同步状态）
 KazeApps 新增 `installer_url`、`portable_url`、来源仓库和 Release ID。网页布局不变，`/api/apps` 返回 GitHub 的 `browser_download_url`，不保存短期签名的存储节点 URL，也不代理包体。
 
 旧 JmShelf 客户端要求清单里的 ZIP 与清单同源，因此 `latest.json` 继续使用本站地址，由本站返回 307。客户端下载实际文件仍直接连接 GitHub，并校验大小和 SHA-256，无需立即升级客户端。
+
+外链版本的兼容地址增加 `source=github` 查询参数，避开迁移前按 SHA-256 缓存的 CDN 本站包；响应使用 `no-store`。网页按钮仍直接使用 GitHub URL，不经过这个兼容入口。
 
 默认每 600 秒检查一次并使用 ETag；首次启动后台检查。仅当两个必需附件完整、`state=uploaded`、大小有效且具有 `sha256:` 摘要时才在事务内激活新版本。仓库为空、网络错误、限流、缺附件或同版不同包时都保留当前版本。不自动降级。
 

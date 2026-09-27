@@ -56,7 +56,7 @@ UsoShelf 把本地图片目录整理成可搜索的书架，提供系列、收�
 
 ### 使用安装包
 
-从[应用下载站](https://apps.usotsuki-kaze.com/)获取安装版或便携版。GitHub 首个 Release 发布后，也可从本仓库的 [Releases](https://github.com/UsotsukiKaze/UsoShelf/releases) 下载。
+从 [GitHub 最新稳定版](https://github.com/UsotsukiKaze/UsoShelf/releases/latest) 或[应用下载站](https://apps.usotsuki-kaze.com/)获取安装版或便携版。下载站自动同步 GitHub Release，网页下载按钮直接指向 GitHub 附件。
 
 - 系统：Windows 10 / 11，x64。
 - 运行环境：Microsoft Edge WebView2 Runtime、.NET Framework 4.6.2 或更高版本。
@@ -105,6 +105,8 @@ uv run python scripts/prepare-release.py
 安装器构建需要 Inno Setup，可通过 `JMSHELF_ISCC_PATH` 指定 `ISCC.exe`。生成的 ICO 来自仓库内的 `public/ukp.png`，无需额外品牌素材。
 
 包体只作为 Release 附件发布，**不加入 Git 历史**。发布步骤、兼容链路及校验规则见 [发布说明](docs/RELEASING.md)。
+
+已补档的重要旧版本见 [历史版本索引](docs/HISTORICAL_RELEASES.md)。历史标签仅保存原包归档说明与校验记录，不含当时源码；可构建源码从 `v1.3.4` 开始。
 
 ## 项目结构
 
