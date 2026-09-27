@@ -1,0 +1,38 @@
+[project]
+name = "jmshelf"
+version = "1.3.4"
+description = "Local-only Windows comic library and reader"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.116",
+    "jmcomic",
+    "pillow>=11.3",
+    "pystray>=0.19.5",
+    "pywebview>=6.1",
+    "uvicorn>=0.35",
+]
+
+[project.scripts]
+jmshelf = "jmshelf.main:run"
+
+[project.gui-scripts]
+jmshelf-desktop = "jmshelf.desktop:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "httpx2",
+    "pyinstaller>=6.18",
+    "pytest>=8.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-p no:cacheprovider"

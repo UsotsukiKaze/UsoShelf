@@ -1,0 +1,27 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 3, 4, 0),
+    prodvers=(1, 3, 4, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'080404B0',
+        [StringStruct(u'CompanyName', u'UsotsukiKaze'),
+         StringStruct(u'FileDescription', u'JmShelf 本地书架'),
+         StringStruct(u'FileVersion', u'1.3.4'),
+         StringStruct(u'InternalName', u'JmShelf'),
+         StringStruct(u'LegalCopyright', u'Private local application'),
+         StringStruct(u'OriginalFilename', u'JmShelf.exe'),
+         StringStruct(u'ProductName', u'JmShelf'),
+         StringStruct(u'ProductVersion', u'1.3.4')])
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)

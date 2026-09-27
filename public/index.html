@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#101116">
+  <title>JmShelf · 本地书架</title>
+  <link rel="icon" href="/ukp.png" type="image/png">
+  <script>
+    (() => {
+      let theme = 'dark';
+      try {
+        const saved = localStorage.getItem('jmshelf-theme');
+        if (saved === 'dark' || saved === 'light') theme = saved;
+      } catch (_) {}
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <link rel="stylesheet" href="/styles.css?v=20260925-01">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-shell">
+        <div class="brand" data-native-drag-region>
+          <div class="brand-mark"><img src="/ukp.png" alt=""></div>
+          <div><strong>JmShelf</strong><span>PRIVATE LIBRARY</span></div>
+        </div>
+        <button type="button" id="app-update-new" class="app-update-new hidden" aria-label="查看可用更新" title="发现新版本">NEW</button>
+      </div>
+
+      <nav aria-label="主导航">
+        <button class="nav-item is-active" data-collection="">
+          <span class="nav-icon icon icon-grid" aria-hidden="true"></span><span>全部本子</span><small id="all-count">0</small>
+        </button>
+        <button class="nav-item jm-online-nav" data-collection="jm-online">
+          <span class="nav-icon icon icon-search" aria-hidden="true"></span><span>JMonline</span><small>LIVE</small>
+        </button>
+        <button class="nav-item jm-favorites-nav" data-collection="jm-favorites">
+          <span class="nav-icon icon icon-heart" aria-hidden="true"></span><span>JM 收藏</span><small id="jm-favorites-count">—</small>
+        </button>
+        <button class="nav-item" data-collection="unfiled">
+          <span class="nav-icon icon icon-document" aria-hidden="true"></span><span>未分类</span>
+        </button>
+      </nav>
+
+      <div class="section-title"><span>我的目录</span><button id="add-collection" title="新建收藏夹" aria-label="新建收藏夹"><span class="icon icon-plus" aria-hidden="true"></span></button></div>
+      <div id="collection-tree" class="collection-tree"></div>
+
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-tools" role="group" aria-label="账号与设置">
+        <button class="sidebar-tool provider-login-card" id="open-account" type="button">
+          <span class="status-dot" id="provider-dot"></span>
+          <span><strong>JM 登录</strong><small id="provider-label">连接中…</small></span>
+        </button>
+        <button class="sidebar-tool settings-entry" id="open-settings" type="button">
+          <span class="icon icon-settings" aria-hidden="true"></span>
+          <span><strong>设置</strong><small>阅读与下载</small></span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar" data-native-drag-region>
+        <label class="search-box">
+          <span class="icon icon-search" aria-hidden="true"></span>
+          <input id="search-input" type="search" placeholder="搜索昵称、标题、作者、标签或车牌…" autocomplete="off">
+          <kbd>Ctrl K</kbd>
+        </label>
+        <button type="button" id="theme-toggle" class="icon-button theme-toggle" aria-label="切换到亮色主题" title="切换到亮色主题">
+          <span class="theme-toggle-glyph" aria-hidden="true">
+            <svg class="theme-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.6" fill="currentColor"/><path d="M12 1.8v3M12 19.2v3M1.8 12h3M19.2 12h3M4.8 4.8l2.1 2.1M17.1 17.1l2.1 2.1M19.2 4.8l-2.1 2.1M6.9 17.1l-2.1 2.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg class="theme-moon" viewBox="0 0 24 24"><defs><mask id="theme-moon-mask"><rect width="24" height="24" fill="white"/><circle class="theme-moon-cutout" cx="17" cy="7" r="8" fill="black"/></mask></defs><circle cx="12" cy="12" r="8.2" fill="currentColor" mask="url(#theme-moon-mask)"/></svg>
+          </span>
+        </button>
+        <div class="window-controls native-only" role="group" aria-label="窗口控制">
+          <button type="button" id="window-minimize" aria-label="最小化" title="最小化"><span class="icon icon-window-minimize" aria-hidden="true"></span></button>
+          <button type="button" id="window-maximize" aria-label="最大化窗口" title="最大化或还原"><span id="window-maximize-icon" class="icon icon-window-maximize" aria-hidden="true"></span></button>
+          <button type="button" id="window-close" class="window-close" aria-label="关闭 JmShelf" title="关闭"><span class="icon icon-window-close" aria-hidden="true"></span></button>
+        </div>
+      </header>
+
+      <section id="library-section" class="library-section">
+        <div class="library-heading">
+          <div><p class="eyebrow">LOCAL ARCHIVE</p><h1 id="view-title">全部本子</h1></div>
+          <div class="library-meta">
+            <span id="result-count">0 本</span>
+            <div id="library-filter" class="library-filter" role="group" aria-label="书架类型筛选">
+              <button type="button" class="library-filter-button filter-all is-active" data-library-filter="all" aria-label="显示全部漫画" title="全部漫画">ALL</button>
+              <button type="button" class="library-filter-button filter-custom" data-library-filter="custom" aria-label="只显示自建系列" title="自建系列"><span class="icon icon-folder" aria-hidden="true"></span></button>
+              <button type="button" class="library-filter-button filter-source" data-library-filter="source" aria-label="只显示禁漫书库" title="禁漫书库"><span class="icon icon-book" aria-hidden="true"></span></button>
+              <button type="button" class="library-filter-button filter-standalone" data-library-filter="standalone" aria-label="只显示单行本" title="单行本"><span class="icon icon-paper" aria-hidden="true"></span></button>
+            </div>
+            <select id="library-sort" aria-label="书架排序">
+              <option value="updated">最新更新</option>
+              <option value="unread">未读优先</option>
+              <option value="most-read">最常阅读</option>
+              <option value="recent-read">最近阅读</option>
+              <option value="added">最近加入</option>
+              <option value="title">标题顺序</option>
+              <option value="pages">页数最多</option>
+              <option value="default">默认顺序</option>
+            </select>
+            <select id="density-select" aria-label="封面密度"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select>
+          </div>
+        </div>
+        <div id="comic-grid" class="comic-grid"></div>
+        <div id="empty-state" class="empty-state hidden">
+          <div class="empty-glyph"><img src="/ukp.png" alt=""></div>
+          <h2>书架还是空的</h2>
+          <p>导入一个本子目录，或输入车牌从信息源建立条目。</p>
+          <button class="button primary" data-action="empty-import"><span class="icon icon-import" aria-hidden="true"></span>选择文件夹</button>
+        </div>
+      </section>
+
+      <section id="online-section" class="online-section hidden" aria-label="JMonline">
+        <section id="online-recommendations" class="online-block online-home-recommendations" data-online-panel="home">
+          <div class="online-block-heading">
+            <div><h2>猜你喜欢</h2></div>
+            <div class="online-recommendation-controls">
+              <label class="online-recommendation-sort"><span>排序</span><select id="online-recommendation-sort"><option value="diverse">综合推荐</option><option value="match">最佳匹配</option><option value="latest">最新发布</option><option value="pictures">页数最多</option></select></label>
+              <span id="online-recommendation-seed" class="online-seed">正在加载…</span>
+              <button id="online-exclude-tags-toggle" type="button" class="button ghost" aria-expanded="false"><span class="icon icon-tag" aria-hidden="true"></span><span>排除标签</span><b id="online-exclude-tags-count" class="hidden">0</b></button>
+              <button id="online-refresh-recommendations" type="button" class="button ghost"><span class="icon icon-refresh" aria-hidden="true"></span>换一批</button>
+            </div>
+          </div>
+          <div id="online-exclude-tags-panel" class="online-exclude-tags-panel hidden">
+            <div class="online-exclude-tags-search">
+              <span class="icon icon-search" aria-hidden="true"></span>
+              <input id="online-exclude-tag-query" type="search" autocomplete="off" placeholder="查找要排除的标签" aria-label="查找要排除的标签">
+              <button id="online-clear-excluded-tags" type="button" class="online-text-button">清空</button>
+            </div>
+            <div id="online-excluded-tag-list" class="online-excluded-tag-list"></div>
+            <div id="online-exclude-tag-results" class="online-exclude-tag-results"></div>
+          </div>
+          <div id="online-taste-profile" class="online-taste-profile hidden">
+            <div><span>推荐标签</span><div id="online-profile-tags" class="online-profile-tags"></div></div>
+          </div>
+          <div id="online-recommend-status" class="online-recommend-status">正在加载推荐…</div>
+          <div id="online-recommend-grid" class="online-grid online-recommend-grid"></div>
+        </section>
+
+        <section id="online-home-rankings" class="online-block online-rankings" data-online-panel="home">
+          <div class="online-block-heading">
+            <div><h2>榜单与新作</h2></div>
+            <span id="online-home-updated" class="online-result-meta">正在加载…</span>
+          </div>
+          <div id="online-home-status" class="online-status">正在加载榜单…</div>
+          <div id="online-home-sections" class="online-ranking-sections"></div>
+        </section>
+
+        <section id="online-category-page" class="online-category-page hidden" data-online-panel="categories">
+          <div class="online-category-page-heading">
+            <h2>全部分类</h2>
+            <div class="online-category-page-filters">
+              <label><span>排序</span><select id="online-category-sort"><option value="latest">最新发布</option><option value="views">最多观看</option><option value="likes">最多点赞</option><option value="pictures">页数最多</option><option value="rating">评分最高</option><option value="comments">评论最多</option></select></label>
+              <label><span>时间</span><select id="online-category-time"><option value="all">全部时间</option><option value="today">今天</option><option value="week">本周</option><option value="month">本月</option></select></label>
+            </div>
+          </div>
+          <div class="online-category-grid online-category-page-grid" aria-label="全部在线分类">
+            <button type="button" data-online-category-browse="all"><strong>全部</strong><small>所有作品</small></button>
+            <button type="button" data-online-category-browse="doujin"><strong>同人</strong><small>同人创作</small></button>
+            <button type="button" data-online-category-browse="single"><strong>单本</strong><small>单行作品</small></button>
+            <button type="button" data-online-category-browse="short"><strong>短篇</strong><small>短篇作品</small></button>
+            <button type="button" data-online-category-browse="hanman"><strong>韩漫</strong><small>韩系作品</small></button>
+            <button type="button" data-online-category-browse="meiman"><strong>美漫</strong><small>欧美作品</small></button>
+            <button type="button" data-online-category-browse="cosplay"><strong>Cosplay</strong><small>角色扮演</small></button>
+            <button type="button" data-online-category-browse="3d"><strong>3D</strong><small>三维作品</small></button>
+            <button type="button" data-online-category-browse="another"><strong>其他</strong><small>其他类型</small></button>
+            <button type="button" data-online-category-browse="english"><strong>英文站</strong><small>英文作品</small></button>
+          </div>
+        </section>
+
+        <form id="online-search-form" class="online-search-panel hidden" data-online-panel="search">
+          <div class="online-query-row">
+            <label class="online-query-box">
+              <span class="icon icon-search" aria-hidden="true"></span>
+              <input id="online-query" type="search" placeholder="关键词、作者、标签，或 +必须包含 -排除…" autocomplete="off">
+            </label>
+            <select id="online-mode" aria-label="搜索范围">
+              <option value="site">综合搜索</option>
+              <option value="work">作品名</option>
+              <option value="author">作者</option>
+              <option value="tag">标签</option>
+              <option value="actor">角色</option>
+            </select>
+            <button id="online-submit" type="submit" class="button primary"><span class="icon icon-search" aria-hidden="true"></span>搜索</button>
+          </div>
+          <div class="online-filter-row">
+            <label><span>排序</span><select id="online-sort"><option value="latest">最新发布</option><option value="views">最多观看</option><option value="likes">最多点赞</option><option value="pictures">页数最多</option><option value="rating">评分最高</option><option value="comments">评论最多</option></select></label>
+            <label><span>分类</span><select id="online-category"><option value="all">全部分类</option><option value="doujin">同人</option><option value="single">单本</option><option value="short">短篇</option><option value="hanman">韩漫</option><option value="meiman">美漫</option><option value="cosplay">Cosplay</option><option value="3d">3D</option><option value="another">其他</option><option value="english">英文站</option></select></label>
+            <label><span>时间</span><select id="online-time"><option value="all">全部时间</option><option value="today">今天</option><option value="week">本周</option><option value="month">本月</option><option value="quarter">近三个月</option><option value="year">近一年</option><option value="custom">自定义</option></select></label>
+            <div id="online-custom-dates" class="online-custom-dates hidden">
+              <label><span>从</span><input id="online-date-from" type="date"></label>
+              <label><span>到</span><input id="online-date-to" type="date"></label>
+            </div>
+          </div>
+          <div class="online-syntax-help">
+            <span>搜索语法</span>
+            <button type="button" data-online-token="+全彩">+必须包含</button>
+            <button type="button" data-online-token="-NTR">-排除</button>
+            <button id="online-clear-temp-cache" type="button" class="online-text-button">清理临时缓存</button>
+          </div>
+          <div class="online-search-assists">
+            <div id="online-suggestion-group" class="online-search-assist-group hidden">
+              <span>推荐搜索</span>
+              <div id="online-search-suggestions" class="online-search-chips"></div>
+            </div>
+            <div id="online-recent-search-group" class="online-search-assist-group hidden">
+              <span>最近搜索</span>
+              <div id="online-recent-searches" class="online-search-chips"></div>
+              <button id="online-clear-history" type="button" class="online-text-button hidden">清空</button>
+            </div>
+          </div>
+        </form>
+
+        <section class="online-block online-results-block hidden" data-online-panel="search categories">
+          <div class="online-block-heading">
+            <div><h2 id="online-results-title">开始在线搜索</h2></div>
+            <span id="online-result-meta" class="online-result-meta">输入关键词开始搜索</span>
+          </div>
+          <div id="online-status" class="online-status">输入关键词后搜索；点击作品可以查看完整详情。</div>
+          <div id="online-grid" class="online-grid"></div>
+          <div id="online-empty" class="online-empty hidden"><strong>没有找到符合条件的作品</strong><span>换一个关键词，或放宽分类与时间范围。</span></div>
+          <nav id="online-pagination" class="online-pagination hidden" aria-label="搜索结果分页">
+            <button id="online-prev" type="button" class="button ghost"><span class="icon icon-arrow-left" aria-hidden="true"></span>上一页</button>
+            <span id="online-page-label">第 1 页</span>
+            <button id="online-next" type="button" class="button ghost">下一页<span class="icon icon-arrow-right" aria-hidden="true"></span></button>
+          </nav>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <span class="window-resize-handle resize-top" data-native-resize="top" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-right" data-native-resize="right" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-bottom" data-native-resize="bottom" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-left" data-native-resize="left" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-top-left" data-native-resize="top-left" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-top-right" data-native-resize="top-right" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-bottom-left" data-native-resize="bottom-left" aria-hidden="true"></span>
+  <span class="window-resize-handle resize-bottom-right" data-native-resize="bottom-right" aria-hidden="true"></span>
+
+  <div class="floating-actions">
+    <div id="download-queue-anchor" class="download-queue-anchor">
+      <section id="download-queue-panel" class="download-queue-panel" aria-label="下载队列" aria-live="polite">
+        <header><span>下载队列</span><small id="download-queue-summary">暂无任务</small></header>
+        <div id="download-queue-list" class="download-queue-list"></div>
+      </section>
+      <button id="quick-add-ball" class="floating-ball quick-add-ball" title="添加；悬停查看下载队列" aria-label="打开添加菜单">
+        <span class="icon icon-plus" aria-hidden="true"></span>
+      </button>
+      <span id="download-queue-badge" class="download-queue-badge hidden" aria-hidden="true">0</span>
+    </div>
+    <button id="panic-ball" class="floating-ball panic-ball" title="缩到系统托盘" aria-label="缩到系统托盘">
+      <img src="/ukp.png" alt="JmShelf">
+    </button>
+  </div>
+
+  <div id="context-menu" class="context-menu hidden" role="menu" aria-hidden="true"></div>
+
+  <div id="detail-scrim" class="scrim hidden"></div>
+  <aside id="detail-drawer" class="detail-drawer" aria-hidden="true">
+    <button class="icon-button drawer-close" data-action="close-detail" aria-label="关闭"><span class="icon icon-close" aria-hidden="true"></span></button>
+    <div class="detail-cover" id="detail-cover"><div class="cover-placeholder"><img src="/ukp.png" alt=""></div></div>
+    <form id="detail-form" class="detail-body">
+      <p class="eyebrow" id="detail-source">LOCAL ITEM</p>
+      <h2 id="detail-display-name">未命名</h2>
+      <p class="original-title" id="detail-original-title"></p>
+      <div class="detail-actions">
+        <button type="button" class="button primary" id="detail-read" data-action="read"><span class="icon icon-play" aria-hidden="true"></span>开始阅读</button>
+        <button type="button" class="button ghost hidden" id="detail-preview" data-action="preview-online"><span class="icon icon-play" aria-hidden="true"></span>在线预览</button>
+        <button type="button" class="button ghost hidden" id="detail-online-chapters" data-action="select-online-chapter"><span class="icon icon-list" aria-hidden="true"></span>选择章节</button>
+        <button type="button" class="button primary hidden" id="detail-online-latest" data-action="preview-online-latest"><span class="icon icon-play" aria-hidden="true"></span>看最新一话</button>
+        <button type="button" class="button ghost" id="detail-rematch" data-action="rematch"><span class="icon icon-refresh" aria-hidden="true"></span>更新信息</button>
+        <button type="button" class="button primary hidden" id="detail-favorite-add" data-action="add-favorite-to-shelf"><span class="icon icon-plus" aria-hidden="true"></span>加入书架</button>
+        <button type="button" class="button ghost hidden" id="detail-favorite-download" data-action="download-favorite"><span class="icon icon-download" aria-hidden="true"></span>下载到书架</button>
+      </div>
+        <label class="field detail-local-only"><span>显示昵称</span><input id="detail-nickname" name="nickname" placeholder="设置后优先作为主标题"></label>
+        <label class="field detail-local-only"><span>我的备注</span><textarea id="detail-note" name="note" rows="4" placeholder="记录版本、翻译、阅读感受……"></textarea></label>
+        <fieldset id="detail-cover-privacy-settings" class="cover-privacy-editor detail-local-only">
+          <legend>封面健全模式</legend>
+          <label class="privacy-enable"><input id="detail-cover-privacy-enabled" type="checkbox"><span>此封面启用渐变亚克力</span></label>
+          <div class="privacy-fields">
+            <label><span>遮挡方向</span><select id="detail-cover-privacy-direction"><option value="below">起点以下</option><option value="above">起点以上</option></select></label>
+            <label><span>模糊起点 <output id="detail-cover-privacy-value">58%</output></span><input id="detail-cover-privacy-start" type="range" min="15" max="85" value="58" step="1"></label>
+          </div>
+          <small>仅在设置中开启健全模式后生效；始终保留至少 15% 封面可见。</small>
+        </fieldset>
+      <div class="metadata-block"><span>作者</span><div id="detail-authors" class="chip-list"></div></div>
+      <div class="metadata-block"><span>标签</span><div id="detail-tags" class="chip-list"></div></div>
+      <div class="metadata-block" id="detail-works-block"><span>作品</span><div id="detail-works" class="chip-list"></div></div>
+      <div class="metadata-block" id="detail-actors-block"><span>登场人物</span><div id="detail-actors" class="chip-list"></div></div>
+      <div class="metadata-block detail-local-only"><span>所在目录</span><div id="detail-collections" class="check-list"></div></div>
+      <div class="path-block detail-local-only"><span>本地路径</span><code id="detail-path">—</code></div>
+      <div class="drawer-footer detail-local-only">
+        <button type="button" class="button danger" data-action="remove-comic"><span class="icon icon-trash" aria-hidden="true"></span>移出书架</button>
+        <button type="submit" class="button primary"><span class="icon icon-save" aria-hidden="true"></span>保存修改</button>
+      </div>
+    </form>
+  </aside>
+
+  <div id="query-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="query-title" aria-hidden="true">
+    <form class="modal-card query-card" id="query-form">
+      <button type="button" class="icon-button modal-close" data-close-modal="query-dialog" aria-label="关闭车牌查询"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <p class="eyebrow">JM LOOKUP</p>
+      <h2 id="query-title">通过车牌查找</h2>
+      <p class="muted">输入数字、JM123456，或粘贴一段包含车牌的文本。</p>
+      <div class="plate-input"><span>JM</span><input id="plate-input" placeholder="123456" autofocus><button class="button primary" type="submit"><span class="icon icon-search" aria-hidden="true"></span>查询</button></div>
+      <div id="query-status" class="inline-status hidden"></div>
+      <div id="query-result" class="query-result hidden"></div>
+    </form>
+  </div>
+
+  <div id="settings-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true">
+    <form class="modal-card settings-card" id="settings-form">
+      <button type="button" class="icon-button modal-close" data-close-modal="settings-dialog" aria-label="关闭信息源设置"><span class="icon icon-close" aria-hidden="true"></span></button>
+        <p class="eyebrow">APP SETTINGS</p>
+        <h2 id="settings-title">JmShelf 设置</h2>
+        <p class="muted">设置封面健全模式、下载目录、代理与 JM 信息源。</p>
+      <label class="field"><span>默认下载地址</span><div class="field-action"><input id="download-path" placeholder="未设置时下载前询问"><button class="button ghost" type="button" id="select-download-path"><span class="icon icon-folder" aria-hidden="true"></span>选择…</button></div></label>
+        <label class="sanity-mode-setting"><input id="sanity-mode" type="checkbox"><span><strong>健全模式</strong><small>在书架与系列页面为已配置封面叠加渐变亚克力模糊。</small></span></label>
+      <label class="field"><span>网络代理（可选）</span><input id="proxy-address" placeholder="例如 http://127.0.0.1:7890"></label>
+      <label class="field"><span>jmcomic 配置文件（可选）</span><input id="option-path" placeholder="例如 D:\jmcomic\option.yml"></label>
+      <section class="settings-shortcuts" aria-label="应用信息">
+        <div><strong>应用更新</strong><small>每次启动时自动检查</small></div>
+        <button type="button" class="button ghost" id="app-update-check"><span class="icon icon-refresh" aria-hidden="true"></span>检查更新</button>
+      <button type="button" class="button ghost" id="open-about"><span class="icon icon-info" aria-hidden="true"></span>关于</button>
+      </section>
+      <div id="settings-status" class="inline-status"></div>
+      <div class="modal-footer"><button class="button ghost" type="button" id="exit-app"><span class="icon icon-close" aria-hidden="true"></span>退出 JmShelf</button><button class="button primary" type="submit"><span class="icon icon-save" aria-hidden="true"></span>保存并检测</button></div>
+    </form>
+  </div>
+
+  <div id="account-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="account-title" aria-hidden="true">
+    <div class="modal-card account-card">
+      <button type="button" class="icon-button modal-close" data-close-modal="account-dialog" aria-label="关闭 JM 登录"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <p class="eyebrow">JM ACCOUNT</p>
+      <h2 id="account-title">JM 登录</h2>
+      <div class="account-block">
+        <div class="account-heading"><span>账号状态</span><small id="account-status">未登录</small></div>
+        <div class="account-fields"><input id="account-username" autocomplete="username" placeholder="账号"><input id="account-password" type="password" autocomplete="current-password" placeholder="密码"></div>
+        <div class="account-actions"><button class="button ghost" type="button" id="account-logout"><span class="icon icon-close" aria-hidden="true"></span>退出登录</button><button class="button primary" type="button" id="account-login"><span class="icon icon-user" aria-hidden="true"></span>登录账号</button></div>
+        <p>账号、密码与会话保存在本机数据目录，启动后直接读取。</p>
+      </div>
+      <details class="login-note"><summary>登录信息如何保存？</summary><p>登录信息以可读 JSON 保存在本机 <code>jm-account.json</code>；不会上传到 JmShelf 之外的服务。</p></details>
+    </div>
+  </div>
+
+  <div id="app-update-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="app-update-title" aria-hidden="true">
+    <div class="modal-card app-update-card">
+      <button type="button" class="icon-button modal-close" data-close-modal="app-update-dialog" aria-label="关闭更新详情"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <header class="app-update-hero">
+        <img src="/ukp.png" alt="" class="app-update-logo">
+        <div><p class="eyebrow">JMSHELF UPDATE</p><h2 id="app-update-title">应用更新</h2><p id="app-update-version">当前版本 —</p></div>
+      </header>
+      <section class="app-update-summary">
+        <div class="app-update-route"><span><small>当前</small><strong id="app-update-current">—</strong></span><i class="icon icon-arrow-right" aria-hidden="true"></i><span><small>最新</small><strong id="app-update-target">—</strong></span></div>
+        <p id="app-update-message" class="muted">正在读取更新状态…</p>
+      </section>
+      <section class="app-update-notes-panel"><div><span>版本变化</span><small>更新内容</small></div><ul id="app-update-notes" class="app-update-notes hidden"></ul><p id="app-update-notes-empty" class="muted">检查后将在这里显示更新内容。</p></section>
+      <div class="app-update-progress hidden" id="app-update-progress"><i></i><span>0%</span></div>
+      <div class="modal-footer app-update-actions"><button type="button" class="button ghost" id="app-update-retry"><span class="icon icon-refresh" aria-hidden="true"></span>重新检查</button><button type="button" class="button primary hidden" id="app-update-download"><span class="icon icon-download" aria-hidden="true"></span>下载更新文件</button><button type="button" class="button primary hidden" id="app-update-apply"><span class="icon icon-refresh" aria-hidden="true"></span>重启并更新</button></div>
+    </div>
+  </div>
+
+  <div id="library-update-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="library-update-title" aria-hidden="true">
+    <div class="modal-card library-update-card">
+      <button type="button" class="icon-button modal-close" data-close-modal="library-update-dialog" aria-label="关闭禁漫书库更新"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <p class="eyebrow">LIBRARY UPDATE</p>
+      <h2 id="library-update-title">禁漫书库发现更新</h2>
+      <p class="muted" id="library-update-summary">启动检查完成。</p>
+      <div id="library-update-list" class="library-update-list"></div>
+      <div class="modal-footer"><button type="button" class="button ghost" data-close-modal="library-update-dialog"><span class="icon icon-close" aria-hidden="true"></span>稍后处理</button></div>
+    </div>
+  </div>
+
+  <div id="about-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="about-title" aria-hidden="true">
+    <div class="modal-card about-card">
+      <button type="button" class="icon-button modal-close" data-close-modal="about-dialog" aria-label="关闭关于页面"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <img src="/ukp.png" alt="JmShelf" class="about-logo">
+      <p class="eyebrow">ABOUT JMSHELF</p>
+      <h2 id="about-title">JmShelf</h2>
+      <p class="about-version" id="about-version">版本 —</p>
+      <p class="muted" id="about-description">轻量、快速、安心的本地漫画书架与阅读器</p>
+      <div class="about-meta"><span>UsotsukiKaze</span><span>Windows x64</span></div>
+    </div>
+  </div>
+
+  <div id="collection-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="collection-dialog-title" aria-hidden="true">
+    <form class="modal-card" id="collection-form">
+      <button type="button" class="icon-button modal-close" data-close-modal="collection-dialog" aria-label="关闭目录编辑"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <p class="eyebrow">NEW COLLECTION</p>
+      <h2 id="collection-dialog-title">新建收藏夹</h2>
+      <label class="field"><span>目录名称</span><input id="collection-name" placeholder="例如：待读、汉化组、年度精选" required></label>
+      <label class="field"><span>上级目录</span><select id="collection-parent"><option value="">顶层目录</option></select></label>
+      <div class="modal-footer"><button type="button" class="button danger hidden" id="delete-collection"><span class="icon icon-trash" aria-hidden="true"></span>删除这个目录</button><span id="collection-hint" class="muted">一本可以同时放进多个目录</span><button class="button primary" type="submit" id="save-collection"><span class="icon icon-save" aria-hidden="true"></span><span>创建目录</span></button></div>
+    </form>
+  </div>
+
+  <div id="confirm-dialog" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" aria-hidden="true">
+    <div class="modal-card confirm-card">
+      <p class="eyebrow">PLEASE CONFIRM</p>
+      <h2 id="confirm-title">确认操作</h2>
+      <p id="confirm-message" class="muted"></p>
+      <div class="modal-footer"><button type="button" class="button ghost" data-action="confirm-cancel"><span class="icon icon-close" aria-hidden="true"></span>取消</button><div class="modal-footer-actions"><button type="button" class="button danger hidden" data-action="confirm-alternative" id="confirm-alternative"><span class="icon icon-trash" aria-hidden="true"></span><span>删除全部</span></button><button type="button" class="button danger" data-action="confirm-accept" id="confirm-accept"><span class="icon icon-tick" aria-hidden="true"></span><span>确认</span></button></div></div>
+    </div>
+  </div>
+
+  <div id="series-builder-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="series-builder-title" aria-hidden="true">
+    <form class="modal-card series-builder-card" id="series-builder-form">
+      <button type="button" class="icon-button modal-close" data-close-modal="series-builder-dialog" aria-label="关闭系列创建"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <p class="eyebrow">LIBRARY SERIES</p>
+      <h2 id="series-builder-title">添加系列</h2>
+      <div class="series-scroll-region series-builder-content" tabindex="0" role="region" aria-label="选择系列本子">
+      <p class="muted">按阅读顺序点击本子。系列名称和主封面自动沿用第 1 本。</p>
+      <div class="series-picker-section">
+        <div class="series-picker-title"><span>已选顺序</span><small id="series-selected-count">0 本</small></div>
+        <div id="series-selected-list" class="series-selected-list"></div>
+      </div>
+      <div class="series-picker-section">
+        <div class="series-picker-title"><span>可选本子</span><small>已在系列中的本子不会重复显示</small></div>
+        <div id="series-candidate-list" class="series-candidate-list"></div>
+      </div>
+      </div>
+      <div id="series-builder-status" class="inline-status hidden"></div>
+      <div class="modal-footer"><span class="muted">至少选择两本</span><button class="button primary" type="submit"><span class="icon icon-grid-add" aria-hidden="true"></span>创建系列</button></div>
+    </form>
+  </div>
+
+  <div id="series-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="series-title" aria-hidden="true">
+    <div class="modal-card series-view-card">
+      <button type="button" class="icon-button modal-close" data-close-modal="series-dialog" aria-label="关闭系列"><span class="icon icon-close" aria-hidden="true"></span></button>
+      <p class="eyebrow">SERIES</p>
+      <h2 id="series-title">系列</h2>
+      <p class="muted" id="series-subtitle"></p>
+      <div id="series-update-status" class="series-update-status hidden" aria-live="polite"></div>
+      <div id="series-chapter-scroll" class="series-scroll-region" tabindex="0" role="region" aria-label="系列章节">
+        <div id="series-book-list" class="series-book-list"></div>
+      </div>
+      <div class="modal-footer"><button type="button" class="button danger" data-action="dissolve-series"><span class="icon icon-trash" aria-hidden="true"></span>解除这个系列</button><div class="modal-footer-actions"><button type="button" class="button ghost hidden" id="series-refresh" data-action="refresh-series"><span class="icon icon-refresh" aria-hidden="true"></span><span>检查更新</span></button><button type="button" class="button primary" id="series-continue-reading" data-action="continue-series"><span class="icon icon-play" aria-hidden="true"></span><span>继续阅读</span></button><button type="button" class="button ghost" data-close-modal="series-dialog"><span class="icon icon-close" aria-hidden="true"></span>关闭</button></div></div>
+    </div>
+  </div>
+
+  <section id="reader" class="reader hidden" aria-hidden="true">
+    <header class="reader-toolbar" data-native-drag-region>
+      <button class="icon-button" data-action="close-reader" aria-label="返回书架"><span class="icon icon-arrow-left" aria-hidden="true"></span></button>
+      <button class="icon-button reader-directory-toggle" data-action="toggle-reader-directory" aria-label="显示章节目录" title="章节目录"><span class="icon icon-list" aria-hidden="true"></span></button>
+      <div class="reader-heading"><strong id="reader-title">阅读</strong><span id="reader-progress">0 / 0</span></div>
+      <div class="reader-chapter-nav">
+        <button type="button" class="button ghost" id="reader-chapter-prev" data-action="reader-chapter-prev"><span class="icon icon-arrow-left" aria-hidden="true"></span><span>上一话</span></button>
+        <button type="button" class="button ghost" id="reader-chapter-next" data-action="reader-chapter-next"><span>下一话</span><span class="icon icon-arrow-right" aria-hidden="true"></span></button>
+      </div>
+      <div class="reader-controls">
+        <div class="reader-mode-switch" role="group" aria-label="阅读模式">
+          <button type="button" class="reader-mode-button is-active" data-reader-mode="scroll" title="上下连续阅读" aria-label="上下连续阅读"><span class="icon icon-reader-scroll" aria-hidden="true"></span></button>
+          <button type="button" class="reader-mode-button" data-reader-mode="page" title="单页翻页" aria-label="单页翻页"><span class="icon icon-paper" aria-hidden="true"></span></button>
+          <button type="button" class="reader-mode-button" data-reader-mode="book" title="书本双页" aria-label="书本双页"><span class="icon icon-reader-spread" aria-hidden="true"></span></button>
+        </div>
+        <div class="reader-auto-controls" id="reader-auto-controls">
+          <button type="button" class="reader-option-button reader-auto-primary" id="reader-auto-toggle" data-action="toggle-reader-auto" aria-pressed="false" title="开始自动滑动"><span class="icon icon-play" aria-hidden="true"></span><span id="reader-auto-label">自动</span></button>
+          <button type="button" class="reader-option-button reader-auto-settings" id="reader-auto-settings" data-action="toggle-reader-auto-settings" aria-expanded="false" aria-controls="reader-auto-popover" title="自动滑动设置"><span class="icon icon-settings" aria-hidden="true"></span></button>
+          <div class="reader-auto-popover hidden" id="reader-auto-popover">
+            <label><span>滚动方式</span><select id="reader-auto-mode" aria-label="自动滑动方式"><option value="continuous">连续匀速</option><option value="stepped">整屏分段</option></select></label>
+            <label><span>速度 / 停顿</span><select id="reader-auto-pace" aria-label="自动滑动速度"><option value="slow">慢速</option><option value="normal" selected>标准</option><option value="fast">快速</option></select></label>
+          </div>
+        </div>
+        <button type="button" class="reader-option-button hidden" id="reader-book-direction" data-action="toggle-book-direction" aria-pressed="false" title="当前为右页前进，点击切换"><span class="icon icon-arrow-right" aria-hidden="true"></span><span>右页前进</span></button>
+        <label id="reader-width-control">宽度 <input id="reader-width" type="range" min="680" max="1600" value="1100" step="20"></label>
+        <button class="button ghost" data-action="reader-top"><span class="icon icon-arrow-up" aria-hidden="true"></span><span>回到顶部</span></button>
+      </div>
+    </header>
+    <button type="button" id="reader-directory-scrim" class="reader-directory-scrim hidden" data-action="toggle-reader-directory" aria-label="隐藏章节目录"></button>
+    <aside id="reader-directory" class="reader-directory" aria-hidden="true">
+      <header><div><small>CHAPTERS</small><strong id="reader-directory-title">章节目录</strong></div><button type="button" class="icon-button" data-action="toggle-reader-directory" aria-label="隐藏章节目录"><span class="icon icon-close" aria-hidden="true"></span></button></header>
+      <div id="reader-directory-list" class="reader-directory-list"></div>
+    </aside>
+    <div id="reader-pages" class="reader-pages"></div>
+    <button class="reader-page-nav reader-prev" data-action="reader-prev" aria-label="上一页"><span class="icon icon-arrow-left" aria-hidden="true"></span></button>
+    <button class="reader-page-nav reader-next" data-action="reader-next" aria-label="下一页"><span class="icon icon-arrow-right" aria-hidden="true"></span></button>
+    <button class="reader-close-float" data-action="close-reader"><span class="icon icon-arrow-left" aria-hidden="true"></span>返回书架</button>
+  </section>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <script type="module" src="/app.js?v=20260925-01"></script>
+</body>
+</html>
