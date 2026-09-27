@@ -696,7 +696,7 @@ JMonline 是独立于本地书架和 JM 收藏的在线发现入口，内部保�
 
 ## 14. 构建与发布
 
-仓库公开名为 `UsotsukiKaze/UsoShelf`，应用和包体继续使用 JmShelf 名称。新发布以 GitHub Releases 为包体来源，KazeApps 仅同步元数据；网页直连 GitHub，旧客户端通过同源兼容地址跳转。迁移兼容性、附件校验与发布步骤见 [RELEASING.md](RELEASING.md)。首次 GitHub Release 尚未发布时必须保留已有站点包体，不能提前删除。
+仓库公开名为 `UsotsukiKaze/UsoShelf`，应用和包体继续使用 JmShelf 名称。新发布以 GitHub Releases 为包体来源，KazeApps 仅同步元数据；网页直连 GitHub，旧客户端通过同源兼容地址跳转。首次 GitHub Release 尚未发布时必须保留已有站点包体，不能提前删除。
 
 ### 14.1 Windows 构建
 

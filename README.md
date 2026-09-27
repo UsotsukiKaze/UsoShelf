@@ -104,7 +104,7 @@ uv run python scripts/prepare-release.py
 
 安装器构建需要 Inno Setup，可通过 `JMSHELF_ISCC_PATH` 指定 `ISCC.exe`。生成的 ICO 来自仓库内的 `public/ukp.png`，无需额外品牌素材。
 
-包体只作为 Release 附件发布，**不加入 Git 历史**。发布步骤、兼容链路及校验规则见 [发布说明](docs/RELEASING.md)。
+包体只作为 Release 附件发布，**不加入 Git 历史**。
 
 已补档的重要旧版本见 [历史版本索引](docs/HISTORICAL_RELEASES.md)。历史标签仅保存原包归档说明与校验记录，不含当时源码；可构建源码从 `v1.3.4` 开始。
 
