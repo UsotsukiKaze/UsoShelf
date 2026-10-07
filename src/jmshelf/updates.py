@@ -72,7 +72,9 @@ class SeriesUpdateChecker:
                 raise ValueError("这个系列正在检查更新")
             self._checking.add(series_id)
         try:
-            manifest = self.provider.inspect_series(source_series_id)
+            # Update checks must query JM, not re-label an old card cache as a
+            # successful check and postpone the next attempt for a full day.
+            manifest = self.provider.inspect_series(source_series_id, fresh=True)
             known_source_ids = {
                 str(member["sourceId"])
                 for member in series.get("members", [])

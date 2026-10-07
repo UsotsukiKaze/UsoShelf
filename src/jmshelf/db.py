@@ -627,13 +627,14 @@ class LibraryDatabase:
             self.connection.execute(
                 """
                 UPDATE library_series
-                SET last_checked_at = ?,
+                SET last_checked_at = CASE WHEN ? IS NULL THEN ? ELSE last_checked_at END,
                     last_update_found_at = CASE WHEN ? > 0 THEN ? ELSE last_update_found_at END,
                     update_items_json = ?,
                     update_error = ?
                 WHERE id = ?
                 """,
                 (
+                    str(error) if error else None,
                     timestamp,
                     found_count,
                     timestamp,

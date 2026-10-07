@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 import time
 
+import pytest
+
 from jmshelf.db import LibraryDatabase
 from jmshelf.updates import SeriesUpdateChecker
 
@@ -8,9 +10,11 @@ from jmshelf.updates import SeriesUpdateChecker
 class StubProvider:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.fresh_calls: list[bool] = []
 
-    def inspect_series(self, source_id: str):
+    def inspect_series(self, source_id: str, *, fresh: bool = False):
         self.calls.append(source_id)
+        self.fresh_calls.append(fresh)
         return {
             "seriesId": source_id,
             "itemCount": 3,
@@ -37,6 +41,7 @@ def test_series_is_checked_once_per_day_and_records_new_chapters() -> None:
     assert checker.is_due(series) is True
     checked = checker.check(series["id"])
     assert provider.calls == ["1019294"]
+    assert provider.fresh_calls == [True]
     assert checked["newCount"] == 1
     refreshed = checked["series"]
     checked_at = datetime.fromisoformat(refreshed["lastCheckedAt"])
@@ -59,9 +64,33 @@ def test_single_source_comic_is_checked_for_its_first_new_chapter() -> None:
     checked = checker.check(series["id"])
 
     assert checked["newCount"] == 2
+    assert provider.fresh_calls == [True]
     assert [item["sourceId"] for item in checked["newItems"]] == ["1096733", "1200000"]
     assert checked["series"]["memberIds"] == [first["id"]]
     checker.close()
+    database.close()
+
+
+def test_failed_remote_check_does_not_claim_series_was_checked() -> None:
+    database = LibraryDatabase()
+    first = database.upsert_comic({"sourceId": "1019294", "seriesId": "1019294", "title": "第一话"})
+    series = database.ensure_source_series("1019294")
+    assert series is not None
+
+    class FailingProvider(StubProvider):
+        def inspect_series(self, source_id: str, *, fresh: bool = False):
+            assert fresh is True
+            raise RuntimeError("JM 网络不可用")
+
+    checker = SeriesUpdateChecker(database, FailingProvider())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="网络不可用"):
+        checker.check(series["id"])
+    failed = database.get_library_series(series["id"])
+    assert failed is not None
+    assert failed["lastCheckedAt"] is None
+    assert failed["updateError"] == "JM 网络不可用"
+    assert checker.is_due(failed)
+    assert failed["memberIds"] == [first["id"]]
     database.close()
 
 
@@ -83,6 +112,7 @@ def test_startup_check_runs_even_when_series_was_checked_recently() -> None:
 
     assert len(startup_results) == 1
     assert provider.calls == ["1019294"]
+    assert provider.fresh_calls == [True]
     checker.close()
     database.close()
 

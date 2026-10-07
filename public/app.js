@@ -1241,13 +1241,16 @@ async function loginProviderAccount() {
   if (!username || !password) return toast('请输入 JM 账号和密码', 'error');
   setBusy(button, true, '登录中…');
   try {
-    await api('/api/provider/login', { method: 'POST', body: { username, password } });
+    const account = await api('/api/provider/login', { method: 'POST', body: { username, password } });
     $('#account-password').value = '';
-    await loadProvider();
-    await loadJmFavorites({ refresh: true, render: state.activeCollection === 'jm-favorites' });
+    state.provider = { ...(state.provider || {}), ...account };
+    renderProviderStatus();
     toast(`已登录 JM 账号 ${username}`);
-  } catch (error) { toast(`登录失败：${error.message}`, 'error', 6500); }
+  } catch (error) { toast(`登录失败：${error.message}`, 'error', 6500); return; }
   finally { setBusy(button, false); }
+  try {
+    await loadJmFavorites({ refresh: true, render: state.activeCollection === 'jm-favorites' });
+  } catch (error) { toast(`已登录，但 JM 收藏读取失败：${error.message}`, 'error', 6500); }
 }
 
 async function logoutProviderAccount() {

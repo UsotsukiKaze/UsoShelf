@@ -95,6 +95,15 @@ def test_jm_favorites_and_startup_library_update_ui_are_wired() -> None:
     assert ".library-update-cover" in stylesheet
 
 
+def test_login_result_is_separate_from_favorites_refresh() -> None:
+    javascript = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+    login = javascript.split("async function loginProviderAccount() {", 1)[1].split(
+        "async function logoutProviderAccount() {", 1
+    )[0]
+    assert login.index("toast(`已登录 JM 账号") < login.index("await loadJmFavorites(")
+    assert "收藏读取失败" in login
+
+
 def test_jmonline_search_recommendations_and_library_sort_are_wired() -> None:
     html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     javascript = (ROOT / "public" / "app.js").read_text(encoding="utf-8")

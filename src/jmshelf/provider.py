@@ -424,6 +424,41 @@ class JmcomicProvider:
             client.retry_times = min(int(client.retry_times), 0 if cover else 1)
         return client
 
+    @staticmethod
+    def _strip_api_response_bom(response: Any) -> Any:
+        """Normalize UTF-8 BOMs before jmcomic validates/parses API JSON."""
+        content = getattr(response, "content", None)
+        if not isinstance(content, bytes) or not content.startswith(b"\xef\xbb\xbf"):
+            return response
+        cleaned = content[3:]
+        try:
+            response.content = cleaned
+        except (AttributeError, TypeError):
+            # requests.Response exposes a read-only content property, backed
+            # by _content; curl_cffi.Response has a writable content field.
+            response._content = cleaned
+        try:
+            del response._text
+        except AttributeError:
+            pass
+        return response
+
+    @classmethod
+    def _enable_api_bom_compat(cls, client: Any) -> Any:
+        if getattr(client, "client_key", None) != "api":
+            return client
+        validate = getattr(client, "raise_if_resp_should_retry", None)
+        if not callable(validate):
+            return client
+
+        def validate_compatible(response: Any, is_image: bool = False) -> Any:
+            if not is_image:
+                cls._strip_api_response_bom(response)
+            return validate(response, is_image)
+
+        client.raise_if_resp_should_retry = validate_compatible
+        return client
+
     def _new_html_client(self, *, direct: bool = False):
         option = self._option()
         self._enable_query_session(option)
@@ -632,6 +667,14 @@ class JmcomicProvider:
             existing = configured.get("cookies") if configured is not None else None
             if not existing:
                 option.update_cookies({"jmshelf_client": "1"})
+        new_jm_client = getattr(option, "new_jm_client", None)
+        if callable(new_jm_client):
+            def compatible_new_jm_client(*args: Any, **kwargs: Any) -> Any:
+                # Apply to every API client this Option creates, including the
+                # downloader's chapter clients, without patching jmcomic globally.
+                return self._enable_api_bom_compat(new_jm_client(*args, **kwargs))
+
+            option.new_jm_client = compatible_new_jm_client
         return option
 
     def _image_domains(self, module, current: str = "", *, spread: bool = False) -> list[str]:
@@ -802,7 +845,8 @@ class JmcomicProvider:
                             pages[futures[future]] = future.result()
             except Exception as exc:
                 if "401" in str(exc):
-                    self.credentials.clear()
+                    # A single failed favorites request must not erase the
+                    # saved password/cookies or make startup restore impossible.
                     with self._cache_lock:
                         self._favorites_cache = None
                     raise ValueError("JM 登录会话已失效，请重新登录") from exc
@@ -1843,7 +1887,7 @@ class JmcomicProvider:
             metadata["sourceWarning"] = cover_warning
         return metadata
 
-    def inspect_series(self, raw_plate: Any) -> dict[str, Any]:
+    def inspect_series(self, raw_plate: Any, *, fresh: bool = False) -> dict[str, Any]:
         """Fetch a lightweight episode manifest without touching image CDNs."""
         source_id = normalize_plate(raw_plate)
         if not source_id:
@@ -1855,7 +1899,7 @@ class JmcomicProvider:
             cached_items = self.database.get_online_metadata([source_id])
             cached = cached_items[0] if cached_items else None
             cached_manifest = list((cached or {}).get("episodeManifest") or [])
-            if cached_manifest:
+            if cached_manifest and not fresh:
                 return {
                     "seriesId": source_id,
                     "seriesTitle": str(cached.get("title") or f"JM{source_id}"),

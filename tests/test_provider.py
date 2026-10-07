@@ -297,6 +297,115 @@ def test_series_inspection_is_lightweight_and_skips_photo_covers(tmp_path: Path)
     database.close()
 
 
+def test_series_refresh_fetches_remote_manifest_even_when_cached(tmp_path: Path) -> None:
+    provider, database, client, _download_calls = build_provider(tmp_path)
+    first = provider.inspect_series("1019294")
+    assert first["itemCount"] == 2
+    client.album.episode_list.append(("1200000", "3", "第三话"))
+    cached = provider.inspect_series("1019294")
+    assert cached["itemCount"] == 2
+    assert len(client.album_calls) == 1
+
+    refreshed = provider.inspect_series("1019294", fresh=True)
+    assert refreshed["itemCount"] == 3
+    assert len(client.album_calls) == 2
+    stored = database.get_online_metadata(["1019294"])[0]
+    assert len(stored["episodeManifest"]) == 3
+    database.close()
+
+
+def test_failed_series_refresh_does_not_report_old_cache_as_new_check(tmp_path: Path) -> None:
+    provider, database, client, _download_calls = build_provider(tmp_path)
+    assert provider.inspect_series("1019294")["itemCount"] == 2
+
+    def unavailable(_source_id: str):
+        raise RuntimeError("JM 暂时不可用")
+
+    client.get_album_detail = unavailable  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="暂时不可用"):
+        provider.inspect_series("1019294", fresh=True)
+    assert database.get_online_metadata(["1019294"])[0]["episodeManifest"]
+    database.close()
+
+
+def test_api_client_strips_utf8_bom_before_upstream_validation(tmp_path: Path) -> None:
+    provider, database, _client, _download_calls = build_provider(tmp_path)
+
+    class Response:
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+            self._text = content.decode("utf-8")
+
+        @property
+        def text(self) -> str:
+            if not hasattr(self, "_text"):
+                self._text = self.content.decode("utf-8")
+            return self._text
+
+    class ApiClient:
+        client_key = "api"
+
+        def raise_if_resp_should_retry(self, response, is_image=False):
+            if not is_image and not response.text.startswith("{"):
+                raise ValueError("response does not begin with JSON")
+            return response
+
+    client = provider._enable_api_bom_compat(ApiClient())
+    response = Response(b'\xef\xbb\xbf{"code":200}')
+    assert client.raise_if_resp_should_retry(response).text == '{"code":200}'
+    assert response.content == b'{"code":200}'
+    image = Response(b"\xef\xbb\xbfimage")
+    assert client.raise_if_resp_should_retry(image, True).content == image.content
+    database.close()
+
+
+def test_api_bom_compat_supports_read_only_content(tmp_path: Path) -> None:
+    provider, database, _client, _download_calls = build_provider(tmp_path)
+
+    class Response:
+        _content = b'\xef\xbb\xbf{"code":200}'
+
+        @property
+        def content(self):
+            return self._content
+
+        @property
+        def text(self):
+            return self._content.decode("utf-8")
+
+    response = Response()
+    provider._strip_api_response_bom(response)
+    assert response.text == '{"code":200}'
+    database.close()
+
+
+def test_option_decorates_each_api_client_it_creates(tmp_path: Path) -> None:
+    provider, database, _client, _download_calls = build_provider(tmp_path)
+    provider._option = JmcomicProvider._option.__get__(provider)
+
+    class ApiClient:
+        client_key = "api"
+
+        def raise_if_resp_should_retry(self, response, is_image=False):
+            if not is_image and not response.content.startswith(b"{"):
+                raise ValueError("response does not begin with JSON")
+            return response
+
+    class Option:
+        client = SimpleNamespace(postman=SimpleNamespace(meta_data={"cookies": {"test": "1"}}))
+
+        def new_jm_client(self, **_kwargs):
+            return ApiClient()
+
+    option = Option()
+    provider._module = lambda: SimpleNamespace(JmOption=SimpleNamespace(default=lambda: option))
+    provider.credentials.load = lambda: None
+    configured = provider._option()
+    response = SimpleNamespace(content=b'\xef\xbb\xbf{"code":200}')
+    assert configured.new_jm_client().raise_if_resp_should_retry(response).content == b'{"code":200}'
+    database.close()
+
+
 def test_preview_manifest_hint_is_local_and_optimistic_until_cached(tmp_path: Path) -> None:
     database = LibraryDatabase()
     provider = JmcomicProvider(database, tmp_path / "data")
@@ -332,10 +441,14 @@ def test_anonymous_option_skips_blocking_cookie_bootstrap_request(tmp_path: Path
         def update_cookies(self, cookies):
             metadata.setdefault("cookies", {}).update(cookies)
 
+        def new_jm_client(self):
+            return SimpleNamespace(client_key="api")
+
     option = Option()
     provider._module = lambda: SimpleNamespace(JmOption=SimpleNamespace(default=lambda: option))
     provider.credentials.load = lambda: None
     assert provider._option() is option
+    assert option.new_jm_client().client_key == "api"
     assert metadata["cookies"] == {"jmshelf_client": "1"}
     assert provider.auth_status()["authenticated"] is False
     database.close()
@@ -1047,11 +1160,10 @@ def test_favorites_require_a_logged_in_account(tmp_path: Path) -> None:
     database.close()
 
 
-def test_expired_favorite_session_is_cleared_with_friendly_error(tmp_path: Path) -> None:
+def test_expired_favorite_session_keeps_saved_credentials_for_retry(tmp_path: Path) -> None:
     provider, database, client, _ = build_provider(tmp_path)
-    provider.auth_status = lambda: {"authenticated": True, "username": "tester"}  # type: ignore[method-assign]
-    cleared: list[bool] = []
-    provider.credentials.clear = lambda: cleared.append(True)  # type: ignore[method-assign]
+    account = {"username": "tester", "password": "saved", "cookies": {"AVS": "old"}}
+    provider.credentials.save(account)
 
     def expired_favorites(**_kwargs):
         raise RuntimeError('{"code":401,"errorMsg":"expired"}')
@@ -1059,5 +1171,5 @@ def test_expired_favorite_session_is_cleared_with_friendly_error(tmp_path: Path)
     client.favorite_folder = expired_favorites  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="登录会话已失效"):
         provider.favorites(fresh=True)
-    assert cleared == [True]
+    assert provider.credentials.load() == account
     database.close()

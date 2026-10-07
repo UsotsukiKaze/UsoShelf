@@ -1,6 +1,6 @@
 # 历史稳定版本归档
 
-归档日期：2026-09-27。当前推荐版本为 [1.3.4](https://github.com/UsotsukiKaze/UsoShelf/releases/tag/v1.3.4)。
+归档日期：2026-09-27。当前推荐版本见 [最新稳定版](https://github.com/UsotsukiKaze/UsoShelf/releases/latest)。
 
 ## 归档原则
 
@@ -10,7 +10,7 @@
 
 ## 版本索引
 
-以下“原站日期”来自 KazeApps 发行记录（UTC），不是此次 GitHub 补档时间。补档 Release 均设为非最新，最新版本仍保持 1.3.4。
+以下“原站日期”来自 KazeApps 发行记录（UTC），不是此次 GitHub 补档时间。补档 Release 均设为非最新。
 
 | 版本 | 原站日期（UTC） | 主要节点 |
 | --- | --- | --- |
