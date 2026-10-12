@@ -6,7 +6,7 @@ const state = {
   collections: [],
   provider: null,
   jmFavorites: null,
-  jmFavoritesLoading: false,
+  jmFavoritesRequestId: 0,
   settings: {},
   series: [],
   activeCollection: '',
@@ -516,37 +516,35 @@ function remoteOnlineComic(item) {
   };
 }
 
-async function loadJmFavorites({ refresh = false, render = true } = {}) {
+async function loadJmFavorites({ refresh = false } = {}) {
   if (!state.provider?.authenticated) {
+    state.jmFavoritesRequestId += 1;
     state.jmFavorites = null;
     $('#jm-favorites-count').textContent = '—';
-    if (render && state.activeCollection === 'jm-favorites') {
+    if (state.activeCollection === 'jm-favorites') {
       state.comics = [];
       renderLibrary();
     }
     return null;
   }
-  if (state.jmFavoritesLoading) return state.jmFavorites;
-  state.jmFavoritesLoading = true;
-  try {
-    const params = new URLSearchParams();
-    const search = $('#search-input').value.trim();
-    if (search) params.set('search', search);
-    if (refresh) params.set('refresh', 'true');
-    const favorites = await api(`/api/provider/favorites?${params}`);
+  const requestId = ++state.jmFavoritesRequestId;
+  const params = new URLSearchParams();
+  const search = $('#search-input').value.trim();
+  if (search) params.set('search', search);
+  if (refresh) params.set('refresh', 'true');
+  const favorites = await api(`/api/provider/favorites?${params}`);
+  if (requestId === state.jmFavoritesRequestId) {
     state.jmFavorites = favorites;
     $('#jm-favorites-count').textContent = favorites.total ?? favorites.items?.length ?? 0;
-    if (render && state.activeCollection === 'jm-favorites') {
+    if (state.activeCollection === 'jm-favorites') {
       state.comics = [
         ...(favorites.localComics || []),
         ...(favorites.remoteItems || []).map(remoteFavoriteComic),
       ];
       renderLibrary();
     }
-    return favorites;
-  } finally {
-    state.jmFavoritesLoading = false;
   }
+  return favorites;
 }
 
 async function loadLibrary() {
@@ -1249,13 +1247,14 @@ async function loginProviderAccount() {
   } catch (error) { toast(`登录失败：${error.message}`, 'error', 6500); return; }
   finally { setBusy(button, false); }
   try {
-    await loadJmFavorites({ refresh: true, render: state.activeCollection === 'jm-favorites' });
+    await loadJmFavorites({ refresh: true });
   } catch (error) { toast(`已登录，但 JM 收藏读取失败：${error.message}`, 'error', 6500); }
 }
 
 async function logoutProviderAccount() {
   try {
     await api('/api/provider/login', { method: 'DELETE' });
+    state.jmFavoritesRequestId += 1;
     $('#account-username').value = '';
     $('#account-password').value = '';
     await loadProvider();
@@ -2830,7 +2829,7 @@ function showSeries(seriesId, { preserveScroll = false } = {}) {
   updateStatus.classList.toggle('has-error', Boolean(series.updateError));
   if (series.updateSupported) {
     if (updateCount) {
-      updateStatus.innerHTML = `${icon('refresh')}<span><strong>发现 ${updateCount} 话更新</strong><small>${escapeHtml(checkLabel)} · 点击更新后会下载并自动加入本系列</small></span>`;
+      updateStatus.innerHTML = `${icon('refresh')}<span><strong>发现 ${updateCount} 话更新</strong><small>${escapeHtml(checkLabel)} · 正在自动更新，失败时可点击重试</small></span>`;
     } else if (series.updateError) {
       updateStatus.innerHTML = `${icon('close')}<span><strong>上次检查失败</strong><small>${escapeHtml(series.updateError)}</small></span>`;
     } else {
@@ -3051,7 +3050,6 @@ async function deleteCollection(collectionId = state.editingCollectionId) {
 }
 
 function openSettings() {
-  $('#option-path').value = state.settings.optionPath || '';
   $('#proxy-address').value = state.settings.proxy || '';
   $('#download-path').value = state.settings.downloadPath || '';
   $('#sanity-mode').checked = Boolean(state.settings.sanityMode);
@@ -3206,7 +3204,10 @@ function showStartupLibraryUpdates(snapshot) {
   if (!updates.length || state.startupLibraryUpdateShown) return;
   state.startupLibraryUpdateShown = true;
   const total = updates.reduce((sum, item) => sum + Number(item.newCount || 0), 0);
-  $('#library-update-summary').textContent = `${updates.length} 部禁漫书库作品共有 ${total} P 尚未下载。选择作品可查看分 P 并决定是否更新。`;
+  const completed = Number(snapshot.updateCompletedCount || 0);
+  const failed = Number(snapshot.updateFailedCount || 0);
+  $('#library-update-title').textContent = failed ? '禁漫书库更新完成，部分失败' : '禁漫书库已自动更新';
+  $('#library-update-summary').textContent = `${updates.length} 部作品发现 ${total} P 更新；${completed} P 已自动更新${failed ? `，${failed} P 未完成，可打开作品重试` : ''}。`;
   $('#library-update-list').innerHTML = updates.map((update, index) => {
     const series = state.series.find((item) => item.id === update.seriesId);
     const cover = series?.members?.[0];
@@ -3225,17 +3226,16 @@ function showStartupLibraryUpdates(snapshot) {
 }
 
 async function waitForStartupLibraryCheck() {
-  const deadline = Date.now() + 3 * 60 * 1000;
-  let snapshot = null;
-  while (Date.now() < deadline) {
-    snapshot = await api('/api/library-series/startup-check');
+  while (true) {
+    const snapshot = await api('/api/library-series/startup-check');
     if (snapshot.state === 'complete') return snapshot;
-    await new Promise((resolve) => setTimeout(resolve, 450));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
   }
-  return snapshot;
 }
 
 async function runStartupNetworkTasks() {
+  checkAppUpdate({ silent: true }).catch(() => {});
+  if (state.provider?.authenticated) loadJmFavorites().catch(() => {});
   try {
     const snapshot = await waitForStartupLibraryCheck();
     if (snapshot?.state === 'complete') {
@@ -3244,9 +3244,6 @@ async function runStartupNetworkTasks() {
     }
   } catch (error) {
     console.warn('启动更新检查失败', error);
-  } finally {
-    checkAppUpdate({ silent: true });
-    if (state.provider?.authenticated) loadJmFavorites({ render: false }).catch(() => {});
   }
 }
 
@@ -3256,7 +3253,6 @@ async function saveSettings(event) {
   setBusy(submit, true, '检测中…');
   try {
     state.settings = await api('/api/settings', { method: 'PATCH', body: {
-      optionPath: $('#option-path').value.trim(),
       proxy: $('#proxy-address').value.trim(),
       downloadPath: $('#download-path').value.trim(),
       sanityMode: $('#sanity-mode').checked
@@ -3327,7 +3323,6 @@ async function selectCollection(collectionId) {
       await loadProvider().catch(() => {});
       renderLibrary();
       toast(`JM 收藏读取失败：${error.message}`, 'error', 6000);
-      openAccount();
       return;
     }
     throw error;
@@ -3578,7 +3573,7 @@ function showSmartCollectionContextMenu(event, collectionId) {
   const smartName = collectionId === 'jm-favorites' ? 'JM 收藏' : (collectionId === 'unfiled' ? '未分类' : '全部本子');
   const items = [{ section: smartName }];
   if (collectionId === 'jm-favorites') {
-    items.push({ label: '刷新 JM 收藏', icon: 'refresh', action: () => loadJmFavorites({ refresh: true, render: true }) });
+    items.push({ label: '刷新 JM 收藏', icon: 'refresh', action: () => loadJmFavorites({ refresh: true }) });
     items.push({ label: '登录与账号', icon: 'user', action: openAccount });
   } else {
     items.push({ label: '打开此分类', icon: collectionId === 'unfiled' ? 'document' : 'grid', action: () => selectCollection(collectionId) });

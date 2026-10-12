@@ -16,7 +16,7 @@
 
 ## 简介
 
-UsoShelf 把本地图片目录整理成可搜索的书架，提供系列、收藏夹和阅读进度管理，也通过可选的 JM 信息源支持在线搜索、章节预览和收藏导入。
+UsoShelf 把本地图片目录整理成可搜索的书架，提供系列、收藏夹和阅读进度管理；内置 JM 信息源支持在线搜索、章节预览和收藏导入。
 
 界面提供暖纸色亮色主题与暗色主题。Windows 桌面端使用 WebView2 窗口，Python 后端只监听本机，不需要部署服务器。
 
@@ -103,6 +103,8 @@ uv run python scripts/prepare-release.py
 ```
 
 安装器构建需要 Inno Setup，可通过 `JMSHELF_ISCC_PATH` 指定 `ISCC.exe`。生成的 ICO 来自仓库内的 `public/ukp.png`，无需额外品牌素材。
+
+正式 Windows 代码签名需要 CA 签发且带可用私钥的代码签名证书，以及 Windows SDK `signtool.exe`。证书已导入 Windows 证书库或使用硬件令牌时，运行 `.\scripts\configure-signing.ps1 -Thumbprint <证书指纹>`；持有 PFX 时可运行 `.\scripts\configure-signing.ps1 -PfxPath <证书文件>`，密码会安全提示输入。脚本验证证书和签名工具后，将证书指纹、工具路径和时间戳地址保存为当前用户的环境变量，不会把私钥或密码写入仓库。构建时会签名并校验主程序、更新器、安装器及卸载器；未配置证书时构建的是未签名包。自签名证书不等同于面向其他用户的受信任签名。
 
 包体只作为 Release 附件发布，**不加入 Git 历史**。
 

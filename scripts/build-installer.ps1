@@ -43,7 +43,18 @@ Push-Location $projectPath
 try {
     $previousSourceDirectory = $env:JMSHELF_INSTALLER_SOURCE_DIR
     $env:JMSHELF_INSTALLER_SOURCE_DIR = $applicationDirectory
-    & $compiler /Qp $installerScript
+    if ($env:JMSHELF_SIGN_CERT_THUMBPRINT) {
+        $thumbprint = ($env:JMSHELF_SIGN_CERT_THUMBPRINT -replace '\s', '').ToUpperInvariant()
+        if ($thumbprint -notmatch '^[A-F0-9]{40}$') { throw 'Invalid code-signing certificate thumbprint.' }
+        $signTool = if ($env:JMSHELF_SIGNTOOL_PATH) { $env:JMSHELF_SIGNTOOL_PATH } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
+        if (-not $signTool -or -not (Test-Path -LiteralPath $signTool -PathType Leaf)) { throw 'signtool.exe was not found.' }
+        $timestamp = if ($env:JMSHELF_TIMESTAMP_URL) { $env:JMSHELF_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+        & (Join-Path $PSScriptRoot 'sign-windows.ps1') -Paths @($application, (Join-Path $applicationDirectory 'JmShelfUpdater.exe')) -VerifyOnly
+        $signCommand = "`"$signTool`" sign /sha1 $thumbprint /fd SHA256 /tr $timestamp /td SHA256 `$f"
+        & $compiler /Qp "-sjmshelf=$signCommand" $installerScript
+    } else {
+        & $compiler /Qp $installerScript
+    }
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed with exit code $LASTEXITCODE." }
 } finally {
     $env:JMSHELF_INSTALLER_SOURCE_DIR = $previousSourceDirectory
@@ -52,6 +63,9 @@ try {
 
 if (-not (Test-Path -LiteralPath $expectedInstaller)) {
     throw "Installer output is missing: $expectedInstaller"
+}
+if ($env:JMSHELF_SIGN_CERT_THUMBPRINT) {
+    & (Join-Path $PSScriptRoot 'sign-windows.ps1') -Paths @($expectedInstaller) -VerifyOnly
 }
 
 $installer = Get-Item -LiteralPath $expectedInstaller

@@ -49,14 +49,10 @@
       <div id="collection-tree" class="collection-tree"></div>
 
       <div class="sidebar-spacer"></div>
-      <div class="sidebar-tools" role="group" aria-label="账号与设置">
+      <div class="sidebar-tools" role="group" aria-label="账号">
         <button class="sidebar-tool provider-login-card" id="open-account" type="button">
           <span class="status-dot" id="provider-dot"></span>
           <span><strong>JM 登录</strong><small id="provider-label">连接中…</small></span>
-        </button>
-        <button class="sidebar-tool settings-entry" id="open-settings" type="button">
-          <span class="icon icon-settings" aria-hidden="true"></span>
-          <span><strong>设置</strong><small>阅读与下载</small></span>
         </button>
       </div>
     </aside>
@@ -74,6 +70,7 @@
             <svg class="theme-moon" viewBox="0 0 24 24"><defs><mask id="theme-moon-mask"><rect width="24" height="24" fill="white"/><circle class="theme-moon-cutout" cx="17" cy="7" r="8" fill="black"/></mask></defs><circle cx="12" cy="12" r="8.2" fill="currentColor" mask="url(#theme-moon-mask)"/></svg>
           </span>
         </button>
+        <button type="button" id="open-settings" class="icon-button topbar-settings" aria-label="设置" title="设置"><span class="icon icon-settings" aria-hidden="true"></span></button>
         <div class="window-controls native-only" role="group" aria-label="窗口控制">
           <button type="button" id="window-minimize" aria-label="最小化" title="最小化"><span class="icon icon-window-minimize" aria-hidden="true"></span></button>
           <button type="button" id="window-maximize" aria-label="最大化窗口" title="最大化或还原"><span id="window-maximize-icon" class="icon icon-window-maximize" aria-hidden="true"></span></button>
@@ -318,11 +315,10 @@
       <button type="button" class="icon-button modal-close" data-close-modal="settings-dialog" aria-label="关闭信息源设置"><span class="icon icon-close" aria-hidden="true"></span></button>
         <p class="eyebrow">APP SETTINGS</p>
         <h2 id="settings-title">JmShelf 设置</h2>
-        <p class="muted">设置封面健全模式、下载目录、代理与 JM 信息源。</p>
+        <p class="muted">设置封面健全模式、下载目录与网络代理。</p>
       <label class="field"><span>默认下载地址</span><div class="field-action"><input id="download-path" placeholder="未设置时下载前询问"><button class="button ghost" type="button" id="select-download-path"><span class="icon icon-folder" aria-hidden="true"></span>选择…</button></div></label>
         <label class="sanity-mode-setting"><input id="sanity-mode" type="checkbox"><span><strong>健全模式</strong><small>在书架与系列页面为已配置封面叠加渐变亚克力模糊。</small></span></label>
       <label class="field"><span>网络代理（可选）</span><input id="proxy-address" placeholder="例如 http://127.0.0.1:7890"></label>
-      <label class="field"><span>jmcomic 配置文件（可选）</span><input id="option-path" placeholder="例如 D:\jmcomic\option.yml"></label>
       <section class="settings-shortcuts" aria-label="应用信息">
         <div><strong>应用更新</strong><small>每次启动时自动检查</small></div>
         <button type="button" class="button ghost" id="app-update-check"><span class="icon icon-refresh" aria-hidden="true"></span>检查更新</button>
@@ -372,7 +368,7 @@
       <h2 id="library-update-title">禁漫书库发现更新</h2>
       <p class="muted" id="library-update-summary">启动检查完成。</p>
       <div id="library-update-list" class="library-update-list"></div>
-      <div class="modal-footer"><button type="button" class="button ghost" data-close-modal="library-update-dialog"><span class="icon icon-close" aria-hidden="true"></span>稍后处理</button></div>
+      <div class="modal-footer"><button type="button" class="button ghost" data-close-modal="library-update-dialog"><span class="icon icon-close" aria-hidden="true"></span>知道了</button></div>
     </div>
   </div>
 

@@ -149,6 +149,46 @@ def test_startup_worker_exposes_completed_update_summary() -> None:
         "displayName": series["displayName"],
         "newCount": 1,
         "items": [{"sourceId": "1200000", "title": "第三话", "chapterIndex": 3}],
+        "tasks": [],
+        "error": "",
     }]
     checker.close()
+    database.close()
+
+
+def test_startup_auto_updates_before_announcing_new_chapters() -> None:
+    database = LibraryDatabase()
+    first = database.upsert_comic({"sourceId": "1019294", "seriesId": "1019294", "title": "第一话"})
+    series = database.ensure_source_series("1019294")
+    assert series is not None
+    statuses = {"job-1": "queued", "job-2": "queued"}
+    queued: list[str] = []
+
+    def enqueue(result):
+        queued.extend(item["sourceId"] for item in result["newItems"])
+        return [{"id": "job-1"}, {"id": "job-2"}]
+
+    checker = SeriesUpdateChecker(
+        database, StubProvider(),  # type: ignore[arg-type]
+        initial_delay_seconds=0,
+        poll_seconds=60,
+        enqueue_updates=enqueue,
+        task_status=lambda task: statuses[task["id"]],
+    )
+    checker.start()
+    deadline = time.monotonic() + 2
+    while checker.startup_snapshot()["state"] != "updating" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert checker.startup_snapshot()["state"] == "updating"
+    assert queued == ["1096733", "1200000"]
+    statuses.update({"job-1": "completed", "job-2": "failed"})
+    while checker.startup_snapshot()["state"] != "complete" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    snapshot = checker.startup_snapshot()
+    assert snapshot["state"] == "complete"
+    assert snapshot["updateCompletedCount"] == 1
+    assert snapshot["updateFailedCount"] == 1
+    assert snapshot["updates"][0]["tasks"] == [{"id": "job-1"}, {"id": "job-2"}]
+    checker.close()
+    assert database.get_library_series(series["id"])["memberIds"] == [first["id"]]
     database.close()

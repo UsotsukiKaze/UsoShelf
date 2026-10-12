@@ -335,6 +335,54 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         configured_path = database.get_setting("download.defaultPath", "").strip()
         return _series_update_output(series, configured_path, resolved_data / "downloads")
 
+    def enqueue_series_updates(check: dict[str, Any]) -> dict[str, Any]:
+        series = database.get_library_series(check["series"]["id"])
+        if not series:
+            raise ValueError("系列已被移除")
+        cache_backed = bool(series.get("members")) and not any(
+            member.get("rootPath") and member.get("storageKind") != "cache"
+            for member in series["members"]
+        )
+        output_path = cache_root if cache_backed else series_update_output(series)
+        tasks: list[dict[str, Any]] = []
+        created_count = 0
+        for item in check["newItems"]:
+            source_id = str(item["sourceId"])
+            title = f"{series['displayName']} · {item['title']}"
+            if cache_backed:
+                task, created = caches.enqueue(
+                    source_id, output_path, title,
+                    {"selectedSourceIds": [source_id]},
+                )
+            else:
+                task, created = downloads.enqueue(source_id, output_path, title)
+            tasks.append({**task, "queueKind": "cache" if cache_backed else "download"})
+            created_count += int(created)
+        return {
+            "tasks": tasks,
+            "queuedCount": created_count,
+            "outputPath": str(output_path),
+            "queueKind": "cache" if cache_backed else "download",
+        }
+
+    def automatic_series_updates(check: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {"id": task["id"], "sourceId": task["sourceId"], "queueKind": task["queueKind"]}
+            for task in enqueue_series_updates(check)["tasks"]
+        ]
+
+    def series_update_task_status(task_ref: dict[str, Any]) -> str:
+        queue = caches if task_ref.get("queueKind") == "cache" else downloads
+        task_id = str(task_ref.get("id") or "")
+        task = next((item for item in queue.snapshot()["items"] if item["id"] == task_id), None)
+        if task:
+            return str(task["status"])
+        comic = database.get_comic_by_source(str(task_ref.get("sourceId") or ""))
+        return "completed" if comic and comic.get("rootPath") else "failed"
+
+    series_updates.enqueue_updates = automatic_series_updates
+    series_updates.task_status = series_update_task_status
+
     def assert_comics_idle(comics: list[dict[str, Any]], action: str) -> None:
         active_sources: set[str] = set()
         for task in [*downloads.snapshot()["items"], *caches.snapshot()["items"]]:
@@ -1618,39 +1666,11 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     @app.post("/api/library-series/{series_id}/refresh", status_code=202)
     async def refresh_library_series(series_id: str):
         check = await asyncio.to_thread(series_updates.check, series_id)
-        series = database.get_library_series(series_id)
-        if not series:
-            raise _error(404, "未找到系列")
-        cache_backed = bool(series.get("members")) and not any(
-            member.get("rootPath") and member.get("storageKind") != "cache"
-            for member in series["members"]
-        )
-        output_path = cache_root if cache_backed else series_update_output(series)
-        tasks: list[dict[str, Any]] = []
-        created_count = 0
-        for item in check["newItems"]:
-            if cache_backed:
-                task, created = caches.enqueue(
-                    str(item["sourceId"]),
-                    output_path,
-                    f"{series['displayName']} · {item['title']}",
-                    {"selectedSourceIds": [str(item["sourceId"])]},
-                )
-            else:
-                task, created = downloads.enqueue(
-                    str(item["sourceId"]),
-                    output_path,
-                    f"{series['displayName']} · {item['title']}",
-                )
-            tasks.append(task)
-            created_count += int(created)
+        queued = enqueue_series_updates(check)
         return {
             **check,
             "series": database.get_library_series(series_id),
-            "tasks": tasks,
-            "queuedCount": created_count,
-            "outputPath": str(output_path),
-            "queueKind": "cache" if cache_backed else "download",
+            **queued,
         }
 
     @app.delete("/api/library-series/{series_id}")
@@ -1795,7 +1815,6 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     @app.get("/api/settings")
     def get_settings():
         return {
-            "optionPath": database.get_setting("provider.optionPath", ""),
             "proxy": database.get_setting("provider.proxy", ""),
             "downloadPath": database.get_setting("download.defaultPath", ""),
             "sanityMode": database.get_setting("privacy.sanityMode", "0") == "1",
@@ -1803,11 +1822,6 @@ def create_app(data_root: Path | None = None) -> FastAPI:
 
     @app.patch("/api/settings")
     def update_settings(payload: dict[str, Any] = Body(default_factory=dict)):
-        if "optionPath" in payload:
-            option_path = str(payload["optionPath"] or "").strip()
-            if option_path and not Path(option_path).expanduser().is_file():
-                raise ValueError("jmcomic 配置文件不存在")
-            database.set_setting("provider.optionPath", option_path)
         if "proxy" in payload:
             database.set_setting("provider.proxy", provider.normalize_proxy(payload["proxy"]))
         if "downloadPath" in payload:

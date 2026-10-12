@@ -26,6 +26,12 @@ def test_settings_and_multi_plate_query_controls_are_present() -> None:
     javascript = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
     assert 'id="download-path"' in html
     assert 'id="proxy-address"' in html
+    assert 'id="option-path"' not in html
+    assert html.index('id="open-settings"') > html.index('id="theme-toggle"')
+    assert html.index('id="open-settings"') < html.index('class="window-controls native-only"')
+    sidebar = html.split('class="sidebar-tools"', 1)[1].split('</aside>', 1)[0]
+    assert 'id="open-account"' in sidebar
+    assert 'id="open-settings"' not in sidebar
     assert 'id="chapter-concurrency"' not in html
     assert 'id="image-concurrency"' not in html
     assert 'data-action="add-query-item"' in javascript

@@ -4,7 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from .db import LibraryDatabase, now_iso
 from .provider import JmcomicProvider
@@ -21,12 +21,16 @@ class SeriesUpdateChecker:
         check_interval: timedelta = timedelta(days=1),
         poll_seconds: float = 15 * 60,
         initial_delay_seconds: float = 2,
+        enqueue_updates: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
+        task_status: Callable[[dict[str, Any]], str] | None = None,
     ) -> None:
         self.database = database
         self.provider = provider
         self.check_interval = check_interval
         self.poll_seconds = max(1.0, poll_seconds)
         self.initial_delay_seconds = max(0.0, initial_delay_seconds)
+        self.enqueue_updates = enqueue_updates
+        self.task_status = task_status
         self._closing = threading.Event()
         self._worker: threading.Thread | None = None
         self._lock = threading.RLock()
@@ -38,6 +42,8 @@ class SeriesUpdateChecker:
             "eligibleCount": 0,
             "checkedCount": 0,
             "failedCount": 0,
+            "updateCompletedCount": 0,
+            "updateFailedCount": 0,
             "updates": [],
         }
 
@@ -114,7 +120,9 @@ class SeriesUpdateChecker:
             if not self.is_due(series):
                 continue
             try:
-                results.append(self.check(series["id"]))
+                result = self.check(series["id"])
+                self._enqueue_new_items(result)
+                results.append(result)
             except Exception:
                 # The error is persisted for the UI. One failing source must not
                 # prevent the rest of the library from being checked.
@@ -137,11 +145,21 @@ class SeriesUpdateChecker:
                 if self._closing.is_set():
                     break
                 try:
-                    results.append(future.result())
+                    result = future.result()
+                    self._enqueue_new_items(result)
+                    results.append(result)
                 except Exception:
                     # Errors are persisted by check(); continue checking other series.
                     continue
         return results
+
+    def _enqueue_new_items(self, result: dict[str, Any]) -> None:
+        if not result.get("newItems") or self.enqueue_updates is None:
+            return
+        try:
+            result["updateTasks"] = self.enqueue_updates(result)
+        except Exception as exc:
+            result["updateError"] = str(exc) or type(exc).__name__
 
     def startup_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -181,16 +199,36 @@ class SeriesUpdateChecker:
                 "displayName": result["series"]["displayName"],
                 "newCount": result["newCount"],
                 "items": result["newItems"],
+                "tasks": result.get("updateTasks", []),
+                "error": result.get("updateError", ""),
             }
             for result in results
             if result.get("newCount")
         ]
+        tasks = [task for update in updates for task in update["tasks"]]
+        statuses: list[str] = []
+        if tasks and self.task_status is not None:
+            with self._lock:
+                self._startup_status["state"] = "updating"
+            while not self._closing.wait(0.5):
+                statuses = []
+                for task in tasks:
+                    try:
+                        statuses.append(self.task_status(task))
+                    except Exception:
+                        statuses.append("failed")
+                if all(status not in {"queued", "running"} for status in statuses):
+                    break
+        completed_count = sum(status == "completed" for status in statuses)
+        failed_count = sum(status != "completed" for status in statuses)
         with self._lock:
             self._startup_status.update({
                 "state": "complete",
                 "completedAt": now_iso(),
                 "checkedCount": len(results),
                 "failedCount": max(0, eligible_count - len(results)),
+                "updateCompletedCount": completed_count,
+                "updateFailedCount": failed_count + sum(update["newCount"] for update in updates if update["error"]),
                 "updates": updates,
             })
         while not self._closing.wait(self.poll_seconds):

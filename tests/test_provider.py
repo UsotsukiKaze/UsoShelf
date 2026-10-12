@@ -1173,3 +1173,29 @@ def test_expired_favorite_session_keeps_saved_credentials_for_retry(tmp_path: Pa
         provider.favorites(fresh=True)
     assert provider.credentials.load() == account
     database.close()
+
+
+def test_favorites_retry_after_automatic_session_refresh(tmp_path: Path) -> None:
+    provider, database, _client, _ = build_provider(tmp_path)
+    provider.credentials.save({"username": "tester", "password": "saved", "cookies": {"AVS": "stale"}})
+    calls: list[str] = []
+
+    class LoginClient(dict):
+        def favorite_folder(self, **_kwargs):
+            calls.append(str(self["cookies"]["AVS"]))
+            if self["cookies"]["AVS"] == "stale":
+                raise RuntimeError('{"code":401,"errorMsg":"expired"}')
+            return SimpleNamespace(page_count=1, total=1, content=[("701", {"name": "已恢复"})])
+
+        def login(self, username, _password):
+            self["cookies"] = {"AVS": "fresh"}
+            return SimpleNamespace(res_data={"username": username})
+
+    client = LoginClient(cookies={"AVS": "stale"})
+    provider._run_query = lambda operation, **_kwargs: operation(client)  # type: ignore[method-assign]
+    result = provider.favorites(fresh=True)
+
+    assert calls == ["stale", "fresh"]
+    assert result["items"][0]["albumId"] == "701"
+    assert provider.credentials.load()["cookies"]["AVS"] == "fresh"
+    database.close()

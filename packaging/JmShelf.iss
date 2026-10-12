@@ -36,6 +36,10 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} 安装程序
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppNumericVersion}
+#if GetEnv("JMSHELF_SIGN_CERT_THUMBPRINT") != ""
+SignTool=jmshelf
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "languages\ChineseSimplified.isl"

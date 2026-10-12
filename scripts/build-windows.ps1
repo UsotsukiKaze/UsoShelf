@@ -69,6 +69,13 @@ try {
         if ($process.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($process.ExitCode)." }
     }
 
+    if ($env:JMSHELF_SIGN_CERT_THUMBPRINT) {
+        & (Join-Path $PSScriptRoot 'sign-windows.ps1') -Paths @($executable, (Join-Path $outputPath 'JmShelf\JmShelfUpdater.exe'))
+        if ($LASTEXITCODE -ne 0) { throw 'Application signing failed.' }
+    } else {
+        Write-Warning 'Windows binaries are unsigned: no code-signing certificate thumbprint is configured.'
+    }
+
     if (-not $SkipArchive) {
         $archive = Join-Path $outputPath 'JmShelf-windows-x64.zip'
         $archiveCreated = $false

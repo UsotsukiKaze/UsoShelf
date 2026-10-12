@@ -115,7 +115,7 @@ nav { display: grid; gap: 4px; }
 .collection-row:hover .collection-manage, .collection-manage:focus-visible { opacity: 1; }
 .collection-manage:hover { color: var(--accent-2); background: rgba(255,255,255,.06); }
 .sidebar-spacer { flex: 1; min-height: 20px; }
-.sidebar-tools { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 7px; }
+.sidebar-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
 .sidebar-tool { min-width: 0; min-height: 54px; display: grid; grid-template-columns: auto minmax(0,1fr); align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.025); cursor: pointer; text-align: left; }
 .sidebar-tool:hover { background: rgba(255,255,255,.05); }
 .sidebar-tool strong, .sidebar-tool small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -129,6 +129,10 @@ nav { display: grid; gap: 4px; }
 .topbar .search-box, .topbar .search-box *, .topbar .window-controls, .topbar .window-controls * { cursor: revert; }
 .topbar .search-box input { user-select: text; -webkit-user-select: text; }
 .window-controls { height: 42px; align-items: center; gap: 5px; margin-left: auto; padding: 3px; border: 1px solid rgba(255,255,255,.055); border-radius: 13px; background: rgba(255,255,255,.025); }
+.topbar-settings { flex: none; width: 42px; height: 42px; margin-left: auto; }
+.topbar-settings .icon { width: 19px; height: 19px; }
+.topbar-settings:hover .icon { transform: rotate(55deg); transition: transform var(--motion-normal) ease; }
+.topbar-settings + .window-controls { margin-left: 0; }
 .window-controls button { position: relative; width: 44px; height: 34px; display: grid; place-items: center; padding: 0; overflow: hidden; border: 0; border-radius: 9px; background: transparent; color: #92959d; cursor: pointer; transition: color var(--motion-fast) ease, background var(--motion-fast) ease, transform var(--motion-fast) var(--ease-spring), box-shadow var(--motion-fast) ease; }
 .window-controls button::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 12px; height: 2px; border-radius: 99px; background: currentColor; opacity: 0; transform: translate(-50%, 4px) scaleX(.35); transition: opacity var(--motion-fast) ease, transform var(--motion-normal) var(--ease-spring); }
 .window-controls button:hover { color: #fff; background: rgba(255,255,255,.075); box-shadow: inset 0 0 0 1px rgba(255,255,255,.035); }

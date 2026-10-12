@@ -486,10 +486,7 @@ class JmcomicProvider:
             config["type"] = "curl_cffi_session"
 
     def _proxy_is_explicit(self) -> bool:
-        return bool(
-            self.database.get_setting("provider.proxy", "").strip()
-            or self.database.get_setting("provider.optionPath", "").strip()
-        )
+        return bool(self.database.get_setting("provider.proxy", "").strip())
 
     def _record_connection(self, reachable: bool, error: Exception | None = None) -> None:
         with self._connection_lock:
@@ -606,7 +603,7 @@ class JmcomicProvider:
         try:
             import jmcomic  # type: ignore
         except ImportError as exc:
-            raise RuntimeError("jmcomic 尚未安装，请先运行 scripts/setup-jm-provider.ps1") from exc
+            raise RuntimeError("内置 JM 组件缺失，请重新安装完整的 JmShelf 程序") from exc
         return jmcomic
 
     def detect(self) -> dict[str, Any]:
@@ -621,7 +618,6 @@ class JmcomicProvider:
             return {
                 "available": True,
                 "runtime": "python",
-                "command": "uv environment",
                 "version": importlib.metadata.version("jmcomic"),
                 **connection,
                 **self.auth_status(),
@@ -642,14 +638,7 @@ class JmcomicProvider:
 
     def _option(self):
         jmcomic = self._module()
-        option_path = self.database.get_setting("provider.optionPath", "").strip()
-        if option_path:
-            resolved = Path(option_path).expanduser().resolve()
-            if not resolved.is_file():
-                raise RuntimeError(f"jmcomic 配置文件不存在：{resolved}")
-            option = jmcomic.create_option_by_file(str(resolved))
-        else:
-            option = jmcomic.JmOption.default()
+        option = jmcomic.JmOption.default()
         proxy = self.database.get_setting("provider.proxy", "").strip()
         if proxy:
             option.client.postman.meta_data.proxies = proxy
@@ -833,7 +822,7 @@ class JmcomicProvider:
                         lambda client: client.favorite_folder(page=page_number, folder_id="0", username=username)
                     )
 
-            try:
+            def read_pages() -> tuple[Any, int, dict[int, Any]]:
                 first_page = fetch_page(1)
                 page_count = max(1, int(getattr(first_page, "page_count", 1) or 1))
                 pages: dict[int, Any] = {1: first_page}
@@ -843,14 +832,24 @@ class JmcomicProvider:
                         futures = {executor.submit(fetch_page, page): page for page in range(2, page_count + 1)}
                         for future in as_completed(futures):
                             pages[futures[future]] = future.result()
+                return first_page, page_count, pages
+
+            try:
+                first_page, page_count, pages = read_pages()
             except Exception as exc:
                 if "401" in str(exc):
-                    # A single failed favorites request must not erase the
-                    # saved password/cookies or make startup restore impossible.
                     with self._cache_lock:
                         self._favorites_cache = None
-                    raise ValueError("JM 登录会话已失效，请重新登录") from exc
-                raise
+                    restored = self.restore_login()
+                    if restored.get("restored"):
+                        try:
+                            first_page, page_count, pages = read_pages()
+                        except Exception as retry_exc:
+                            raise ValueError("JM 登录会话已失效，请重新登录") from retry_exc
+                    else:
+                        raise ValueError("JM 登录会话已失效，请重新登录") from exc
+                else:
+                    raise
 
             items: list[dict[str, Any]] = []
             seen: set[str] = set()
