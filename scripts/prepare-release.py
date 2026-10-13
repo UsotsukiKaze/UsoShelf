@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tomllib
 import zipfile
 from pathlib import Path
+from jmshelf.credentials import WindowsCredentialStore
+from jmshelf.release_signing import RELEASE_PUBLIC_KEY, sign_release, verify_release
 
 
 def digest(path: Path) -> str:
@@ -14,7 +17,7 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest().upper()
 
 
-def prepare(root: Path) -> Path:
+def prepare(root: Path, *, private_key: bytes | None = None, public_key: str = RELEASE_PUBLIC_KEY) -> Path:
     version = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
     names = (f"JmShelf-Setup-{version}-x64.exe", f"JmShelf-windows-x64-{version}.zip")
     sources = [root / "dist" / name for name in names]
@@ -32,7 +35,7 @@ def prepare(root: Path) -> Path:
         for name in members:
             parts = name.casefold().split("/")
             if (
-                parts[0] != "jmshelf" or ".." in parts
+                parts[0] != "jmshelf" or ".." in parts or any(":" in part or part.rstrip(" .") != part for part in parts)
                 or (len(parts) > 1 and parts[1] in {"data", "webview", ".venv"})
                 or any(part in {".env", "option.yml", "option.yaml"} for part in parts)
                 or name.casefold().endswith((".sqlite3", ".db", ".key"))
@@ -42,6 +45,11 @@ def prepare(root: Path) -> Path:
         corrupt = bundle.testzip()
         if corrupt:
             raise ValueError(f"Corrupt ZIP entry: {corrupt}")
+    if private_key is None:
+        key_path = Path(os.environ.get("JMSHELF_RELEASE_SIGNING_KEY") or root / "data" / "release-signing.dat")
+        if not key_path.is_file():
+            raise ValueError("Missing release signing key; run scripts/configure-release-signing.py")
+        private_key = WindowsCredentialStore._unprotect(key_path.read_bytes())
     output = root / "dist" / f"github-v{version}"
     output.mkdir(exist_ok=True)
     checksums = []
@@ -56,6 +64,9 @@ def prepare(root: Path) -> Path:
         checksums.append(f"{sha}  {source.name}")
         packages.append({"file": source.name, "size": source.stat().st_size, "sha256": sha})
     (output / "SHA256SUMS.txt").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+    signed = sign_release({"schemaVersion": 1, "version": version, "packages": packages}, private_key)
+    verify_release(signed, version, packages[1], public_key=public_key)
+    (output / "RELEASE_SIGNATURE.json").write_text(json.dumps(signed, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "RELEASE_NOTES.md").write_text(f"# JmShelf {version}\n\n" + notes.read_text(encoding="utf-8"), encoding="utf-8")
     print(json.dumps({"version": version, "directory": str(output), "packages": packages}, ensure_ascii=False, indent=2))
     return output

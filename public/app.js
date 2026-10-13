@@ -1,6 +1,44 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+// The backend file survives the desktop server's changing localhost port.
+let uiPreferenceValues = null;
+let uiPreferenceQueue = Promise.resolve();
+const uiStorage = {
+  getItem(key) { return uiPreferenceValues ? (uiPreferenceValues[key] ?? null) : localStorage.getItem(key); },
+  setItem(key, value) {
+    const text = String(value);
+    if (uiPreferenceValues) uiPreferenceValues[key] = text;
+    try { localStorage.setItem(key, text); } catch (_) {}
+    persistUiPreference(key, text);
+  },
+  removeItem(key) {
+    if (uiPreferenceValues) delete uiPreferenceValues[key];
+    try { localStorage.removeItem(key); } catch (_) {}
+    persistUiPreference(key, null);
+  },
+};
+
+function persistUiPreference(key, value) {
+  uiPreferenceQueue = uiPreferenceQueue.catch(() => {}).then(() => api('/api/ui/preferences', {
+    method: 'PATCH', body: { values: { [key]: value } },
+  })).catch((error) => toast(`偏好保存失败：${error.message}`, 'error'));
+}
+
+async function loadUiPreferences() {
+  const saved = await api('/api/ui/preferences');
+  uiPreferenceValues = saved.values || {};
+  if (!saved.persisted) {
+    try {
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith('jmshelf-')) uiPreferenceValues[key] = localStorage.getItem(key);
+      }
+      await api('/api/ui/preferences', { method: 'PATCH', body: { values: uiPreferenceValues } });
+    } catch (_) {}
+  }
+}
+
 const state = {
   comics: [],
   collections: [],
@@ -80,6 +118,7 @@ const state = {
   readerPendingComic: null,
   readerRequestToken: 0,
   readerReturnDetailId: null,
+  readerResumePage: null,
   searchTimer: null,
   contextActions: [],
   downloads: [],
@@ -117,7 +156,7 @@ function applyTheme(theme, { persist = true } = {}) {
   const selected = theme === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.theme = selected;
   if (persist) {
-    try { localStorage.setItem(THEME_STORAGE_KEY, selected); } catch (_) {}
+    try { uiStorage.setItem(THEME_STORAGE_KEY, selected); } catch (_) {}
   }
   const toggle = $('#theme-toggle');
   if (toggle) {
@@ -336,8 +375,8 @@ async function api(url, options = {}) {
   return data;
 }
 
-function setActivityFocus(scope) {
-  api('/api/activity/focus', { method: 'POST', body: { scope } }).catch(() => {});
+function setActivityFocus(scope, comicId = '', previewAlbumId = '') {
+  api('/api/activity/focus', { method: 'POST', body: { scope, comicId, previewAlbumId } }).catch(() => {});
 }
 
 function cancelOnlinePreview(albumId) {
@@ -660,7 +699,7 @@ function recommendationTagUniverse() {
 
 async function persistExcludedRecommendationTags() {
   try {
-    localStorage.setItem(ONLINE_RECOMMEND_EXCLUDED_TAGS_KEY, JSON.stringify(state.online.excludedRecommendationTags));
+    uiStorage.setItem(ONLINE_RECOMMEND_EXCLUDED_TAGS_KEY, JSON.stringify(state.online.excludedRecommendationTags));
   } catch (_) {}
   await api('/api/online/preferences', {
     method: 'PATCH',
@@ -720,9 +759,7 @@ function removeExcludedRecommendationTag(tag) {
 }
 
 function needsOnlineMetadata(comic) {
-  return Boolean(comic?.sourceId
-    && !comic.metadataLoaded
-    && (!comic.publishedAt || !comic.tags?.length || !comic.authors?.length || !comic.episodeManifest?.length));
+  return Boolean(comic?.sourceId && !comic.metadataLoaded && !comic.metadataFailed);
 }
 
 async function hydrateOnlineMetadataOne(sourceId, priority) {
@@ -749,8 +786,9 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
         comic.firstPhotoId = String(metadata.firstPhotoId || comic.episodeManifest[0]?.sourceId || comic.firstPhotoId || '');
         comic.latestSourceId = String(comic.episodeManifest.at(-1)?.sourceId || comic.latestSourceId || '');
         comic.isSourceSeries = comic.episodeManifest.length > 1;
-        comic.metadataLoaded = true;
-        comic.detailLoaded = true;
+        comic.metadataLoaded = Boolean(metadata.metadataFresh ?? metadata.detailsComplete);
+        comic.metadataFailed = !comic.metadataLoaded;
+        comic.detailLoaded = comic.metadataLoaded;
       }
       const isSourceSeries = (metadata.episodeManifest || []).length > 1;
       const dateLabel = isSourceSeries
@@ -770,7 +808,11 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
         configureOnlineDetailActions(state.activeComic);
       }
     }
+    if (state.online.excludedRecommendationTags.length) renderOnlineRecommendations();
   } catch (_) {
+    for (const comic of onlineItems()) {
+      if (String(comic.sourceId) === sourceId) comic.metadataFailed = true;
+    }
     $$(`[data-online-id="${sourceId}"] .online-date`).forEach((node) => { node.textContent = '日期暂不可用'; });
     $$(`[data-online-tags="${sourceId}"]`).forEach((node) => {
       node.innerHTML = '<span>标签暂不可用</span>';
@@ -834,8 +876,11 @@ function hydrateOnlineMetadata(items, { eagerCount = 10 } = {}) {
 
 function renderOnlineRecommendations() {
   const items = state.online.recommendations;
+  const excluded = new Set(state.online.excludedRecommendationTags.map(recommendationTagKey));
+  const visibleItems = items.filter((comic) => !excluded.size || (comic.metadataLoaded
+    && !(comic.tags || []).some((tag) => excluded.has(recommendationTagKey(tag)))));
   const profile = state.online.recommendationProfile;
-  $('#online-recommend-grid').innerHTML = items.map((comic, index) => onlineCardTemplate(comic, index)).join('');
+  $('#online-recommend-grid').innerHTML = visibleItems.map((comic, index) => onlineCardTemplate(comic, index)).join('');
   const updatedLabel = formatSnapshotTime(state.online.recommendationUpdatedAt);
   $('#online-recommendation-seed').textContent = profile
     ? `${updatedLabel ? `${updatedLabel} · ` : ''}${state.online.recommendationBatch + 1}/${state.online.recommendationBatchCount}`
@@ -848,7 +893,7 @@ function renderOnlineRecommendations() {
     `<button type="button" data-profile-tag="${escapeHtml(item.name)}" data-profile-mode="${item.mode}" title="搜索 ${escapeHtml(item.name)}">#${escapeHtml(item.name)}</button>`
   ).join('');
   const status = $('#online-recommend-status');
-  status.classList.toggle('hidden', items.length > 0);
+  status.classList.toggle('hidden', visibleItems.length > 0);
   status.textContent = state.online.recommendationLoading
     ? '正在加载推荐…'
     : (profile
@@ -913,7 +958,7 @@ function rememberOnlineSearch(query, mode) {
     { query: clean, mode: String(mode || 'site') },
     ...state.online.recentSearches.filter((item) => item.query.toLocaleLowerCase() !== clean.toLocaleLowerCase()),
   ].slice(0, 8);
-  try { localStorage.setItem(ONLINE_SEARCH_HISTORY_KEY, JSON.stringify(state.online.recentSearches)); } catch (_) {}
+  try { uiStorage.setItem(ONLINE_SEARCH_HISTORY_KEY, JSON.stringify(state.online.recentSearches)); } catch (_) {}
   renderOnlineSearchAssists();
 }
 
@@ -938,7 +983,9 @@ function renderOnlineResults() {
     : `“${response.query}” 的结果`;
   const pageCount = Math.max(1, Number(response.pageCount || 1));
   const page = Math.max(1, Number(response.page || 1));
-  $('#online-result-meta').textContent = `${Number(response.total || 0).toLocaleString('zh-CN')} 项 · 第 ${page}/${pageCount} 页`;
+  $('#online-result-meta').textContent = response.timeFilterMode === 'page-post-filter'
+    ? `本页 ${Number(response.matchedOnPage || 0)} 项 · 第 ${page}/${pageCount} 页`
+    : `${Number(response.total || 0).toLocaleString('zh-CN')} 项 · 第 ${page}/${pageCount} 页`;
   $('#online-page-label').textContent = `第 ${page} / ${pageCount} 页`;
   $('#online-prev').disabled = page <= 1;
   $('#online-next').disabled = page >= pageCount;
@@ -1601,7 +1648,7 @@ function renderLibrary() {
 function setLibraryFilter(filter) {
   const allowed = new Set(['all', 'custom', 'source', 'standalone']);
   state.libraryFilter = allowed.has(filter) ? filter : 'all';
-  localStorage.setItem('jmshelf-library-filter', state.libraryFilter);
+  uiStorage.setItem('jmshelf-library-filter', state.libraryFilter);
   renderLibrary();
 }
 
@@ -2180,6 +2227,13 @@ function appendReaderPages(comic, pages, { preview = state.readerPreview } = {})
       image?.addEventListener('load', () => image.classList.add('loaded'), { once: true });
     });
   }
+  if (state.readerResumePage !== null && pages.length > state.readerResumePage) {
+    state.readerPageIndex = state.readerResumePage;
+    state.readerResumePage = null;
+    if (state.readerMode === 'scroll') {
+      requestAnimationFrame(() => $(`.reader-page[data-page="${state.readerPageIndex}"]`)?.scrollIntoView({ block: 'start' }));
+    }
+  }
   if (state.readerMode === 'scroll') {
     observeReaderPages(state.readerPages.length);
     $('#reader-progress').textContent = `${state.readerPageIndex + 1} / ${state.readerPages.length}${readerStreamingSuffix()}`;
@@ -2273,19 +2327,21 @@ function activateReader(comic, pages, { preview = false } = {}) {
   clearTimeout(state.readerStreamTimer);
   state.readerPendingComic = null;
   state.readerPreview = preview;
-  setActivityFocus(preview ? 'preview' : 'library');
+  setActivityFocus(preview ? 'preview' : 'library', preview ? '' : comic.id, preview ? state.readerPreviewAlbumId : '');
   state.readerComic = comic;
   state.readerSeries = preview ? null : readerSeriesForComic(comic);
   state.readerPages = pages;
-  state.readerPageIndex = Math.max(0, Math.min(Number(preview ? 0 : comic.progressPage || 0), pages.length - 1));
-  state.readerMode = localStorage.getItem('jmshelf-reader-mode') || 'scroll';
-  state.readerAutoMode = ['continuous', 'stepped'].includes(localStorage.getItem('jmshelf-reader-auto-mode'))
-    ? localStorage.getItem('jmshelf-reader-auto-mode')
+  const savedPage = Math.max(0, Number(preview ? 0 : comic.progressPage || 0));
+  state.readerResumePage = !preview && savedPage >= pages.length ? savedPage : null;
+  state.readerPageIndex = Math.min(savedPage, pages.length - 1);
+  state.readerMode = uiStorage.getItem('jmshelf-reader-mode') || 'scroll';
+  state.readerAutoMode = ['continuous', 'stepped'].includes(uiStorage.getItem('jmshelf-reader-auto-mode'))
+    ? uiStorage.getItem('jmshelf-reader-auto-mode')
     : 'continuous';
-  state.readerAutoPace = ['slow', 'normal', 'fast'].includes(localStorage.getItem('jmshelf-reader-auto-pace'))
-    ? localStorage.getItem('jmshelf-reader-auto-pace')
+  state.readerAutoPace = ['slow', 'normal', 'fast'].includes(uiStorage.getItem('jmshelf-reader-auto-pace'))
+    ? uiStorage.getItem('jmshelf-reader-auto-pace')
     : 'normal';
-  state.readerBookLeftForward = localStorage.getItem('jmshelf-reader-book-left-forward') === 'true';
+  state.readerBookLeftForward = uiStorage.getItem('jmshelf-reader-book-left-forward') === 'true';
   closeDetail();
   $('#reader-title').textContent = preview ? `${comic.displayName} · 在线预览` : comic.displayName;
   $('#reader-pages').innerHTML = pages.map((page) => readerPageTemplate(comic, page, preview)).join('');
@@ -2345,7 +2401,7 @@ async function openReader(comic = state.activeComic) {
   state.readerPreviewAlbumId = '';
   if (previousWasPreview && previousPreviewAlbumId) cancelOnlinePreview(previousPreviewAlbumId);
   try {
-    if (state.readerComic && !previousWasPreview && state.readerComic.id !== comic.id) {
+    if (state.readerComic && !previousWasPreview && state.readerComic.id !== comic.id && state.readerResumePage === null) {
       clearTimeout(state.readerProgressTimer);
       state.readerComic.progressPage = state.readerPageIndex;
       state.readerComic.lastReadAt = new Date().toISOString();
@@ -2433,12 +2489,13 @@ async function switchReaderChapter(directionOrId) {
 }
 
 function saveReaderProgress(page, delay = 250) {
-  if (!state.readerComic || state.readerPreview) return;
+  if (!state.readerComic || state.readerPreview || state.readerResumePage !== null) return;
+  const comicId = state.readerComic.id;
   state.readerComic.progressPage = page;
   state.readerComic.lastReadAt = new Date().toISOString();
   clearTimeout(state.readerProgressTimer);
   state.readerProgressTimer = setTimeout(() => {
-    api(`/api/comics/${state.readerComic.id}/progress`, { method: 'PUT', body: { page } }).catch(() => {});
+    api(`/api/comics/${comicId}/progress`, { method: 'PUT', body: { page } }).catch(() => {});
   }, delay);
 }
 
@@ -2556,14 +2613,14 @@ function restartReaderAutoScrollIfNeeded(update) {
 function setReaderAutoMode(mode) {
   restartReaderAutoScrollIfNeeded(() => {
     state.readerAutoMode = mode === 'stepped' ? 'stepped' : 'continuous';
-    localStorage.setItem('jmshelf-reader-auto-mode', state.readerAutoMode);
+    uiStorage.setItem('jmshelf-reader-auto-mode', state.readerAutoMode);
   });
 }
 
 function setReaderAutoPace(pace) {
   restartReaderAutoScrollIfNeeded(() => {
     state.readerAutoPace = ['slow', 'fast'].includes(pace) ? pace : 'normal';
-    localStorage.setItem('jmshelf-reader-auto-pace', state.readerAutoPace);
+    uiStorage.setItem('jmshelf-reader-auto-pace', state.readerAutoPace);
   });
 }
 
@@ -2587,7 +2644,7 @@ function updateReaderBookDirection() {
 
 function toggleReaderBookDirection() {
   state.readerBookLeftForward = !state.readerBookLeftForward;
-  localStorage.setItem('jmshelf-reader-book-left-forward', String(state.readerBookLeftForward));
+  uiStorage.setItem('jmshelf-reader-book-left-forward', String(state.readerBookLeftForward));
   updateReaderBookDirection();
   if (state.readerMode === 'book') updatePagedReader(false);
 }
@@ -2616,7 +2673,7 @@ function updatePagedReader(save = true) {
 function setReaderMode(mode, savePreference = true) {
   stopReaderAutoScroll();
   state.readerMode = ['scroll', 'page', 'book'].includes(mode) ? mode : 'scroll';
-  if (savePreference) localStorage.setItem('jmshelf-reader-mode', state.readerMode);
+  if (savePreference) uiStorage.setItem('jmshelf-reader-mode', state.readerMode);
   $$('.reader-mode-button').forEach((button) => {
     const active = button.dataset.readerMode === state.readerMode;
     button.classList.toggle('is-active', active);
@@ -2645,6 +2702,7 @@ function setReaderMode(mode, savePreference = true) {
 }
 
 function turnReaderPage(direction) {
+  state.readerResumePage = null;
   if (state.readerMode === 'scroll') return;
   const step = state.readerMode === 'book' ? 2 : 1;
   const previousPage = state.readerPageIndex;
@@ -2665,6 +2723,7 @@ function turnReaderPage(direction) {
 }
 
 function readerToFirstPage() {
+  state.readerResumePage = null;
   if (state.readerMode === 'scroll') $('#reader').scrollTo({ top: 0, behavior: 'smooth' });
   else {
     state.readerPageIndex = 0;
@@ -2683,7 +2742,7 @@ function closeReader() {
   clearTimeout(state.readerStreamTimer);
   clearTimeout(state.readerTurnTimer);
   stopReaderLoadingMotion();
-  if (state.readerComic && !state.readerPreview) {
+  if (state.readerComic && !state.readerPreview && state.readerResumePage === null) {
     const comic = state.readerComic;
     comic.progressPage = state.readerPageIndex;
     comic.lastReadAt = new Date().toISOString();
@@ -2704,6 +2763,7 @@ function closeReader() {
   state.readerPreviewAlbumId = '';
   state.readerSeries = null;
   state.readerPages = [];
+  state.readerResumePage = null;
   if (previewAlbumId) cancelOnlinePreview(previewAlbumId);
   setActivityFocus(state.activeCollection === 'jm-online' ? 'online' : 'library');
   if (returnDetailId) requestAnimationFrame(() => showDetail(returnDetailId));
@@ -2919,7 +2979,9 @@ async function refreshSeries(seriesId) {
     const result = await api(`/api/library-series/${seriesId}/refresh`, { method: 'POST' });
     await Promise.all([loadSeries(), loadDownloads({ notify: false }), loadCaches({ notify: false })]);
     refreshed = true;
-    if (result.newCount === 0) {
+    if (result.updateError) {
+      toast(`已加入 ${result.tasks?.length || 0} 个更新任务，部分失败：${result.updateError}`, 'error', 6500);
+    } else if (result.newCount === 0) {
       toast('检查完成，这个系列已是最新');
     } else if (result.queuedCount > 0) {
       toast(`发现 ${result.newCount} 话更新，已加入下载队列`);
@@ -3116,8 +3178,8 @@ function showLastAppUpdateResult(update) {
   const result = update?.lastApply;
   if (!result?.operationId || !['completed', 'failed'].includes(result.state)) return;
   const storageKey = `jmshelf-update-result-${result.operationId}`;
-  if (localStorage.getItem(storageKey)) return;
-  localStorage.setItem(storageKey, 'shown');
+  if (uiStorage.getItem(storageKey)) return;
+  uiStorage.setItem(storageKey, 'shown');
   if (result.state === 'completed') {
     toast(result.message || `JmShelf ${result.version || ''} 更新完成`, 'info', 5200);
   } else {
@@ -3206,8 +3268,9 @@ function showStartupLibraryUpdates(snapshot) {
   const total = updates.reduce((sum, item) => sum + Number(item.newCount || 0), 0);
   const completed = Number(snapshot.updateCompletedCount || 0);
   const failed = Number(snapshot.updateFailedCount || 0);
-  $('#library-update-title').textContent = failed ? '禁漫书库更新完成，部分失败' : '禁漫书库已自动更新';
-  $('#library-update-summary').textContent = `${updates.length} 部作品发现 ${total} P 更新；${completed} P 已自动更新${failed ? `，${failed} P 未完成，可打开作品重试` : ''}。`;
+  const pending = Number(snapshot.updatePendingCount || 0);
+  $('#library-update-title').textContent = pending ? '禁漫书库仍在更新' : failed ? '禁漫书库更新完成，部分失败' : '禁漫书库已自动更新';
+  $('#library-update-summary').textContent = `${updates.length} 部作品发现 ${total} P 更新；${completed} P 已自动更新${pending ? `，${pending} P 仍在加载` : ''}${failed ? `，${failed} P 未完成，可打开作品重试` : ''}。`;
   $('#library-update-list').innerHTML = updates.map((update, index) => {
     const series = state.series.find((item) => item.id === update.seriesId);
     const cover = series?.members?.[0];
@@ -3226,11 +3289,13 @@ function showStartupLibraryUpdates(snapshot) {
 }
 
 async function waitForStartupLibraryCheck() {
-  while (true) {
+  const deadline = Date.now() + 11 * 60 * 1000;
+  while (Date.now() < deadline) {
     const snapshot = await api('/api/library-series/startup-check');
     if (snapshot.state === 'complete') return snapshot;
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
+  throw new Error('更新检查等待超时，可打开作品查看当前任务');
 }
 
 async function runStartupNetworkTasks() {
@@ -3874,12 +3939,12 @@ $('#reader-auto-pace').addEventListener('change', (event) => setReaderAutoPace(e
 $('#reader-pages').addEventListener('pointerdown', () => stopReaderAutoScroll(true));
 $('#reader').addEventListener('wheel', () => stopReaderAutoScroll(true), { passive: true });
 $('#density-select').addEventListener('change', (event) => {
-  localStorage.setItem('jmshelf-density', event.target.value);
+  uiStorage.setItem('jmshelf-density', event.target.value);
   renderLibrary();
 });
 $('#library-sort').addEventListener('change', (event) => {
   state.librarySort = event.target.value;
-  localStorage.setItem('jmshelf-library-sort', state.librarySort);
+  uiStorage.setItem('jmshelf-library-sort', state.librarySort);
   renderLibrary();
 });
 $('#library-filter').addEventListener('click', (event) => {
@@ -3968,7 +4033,7 @@ $('#online-clear-temp-cache').addEventListener('click', clearOnlineTempCache);
 $('#online-recommendation-sort').addEventListener('change', (event) => {
   state.online.recommendationSort = event.target.value;
   state.online.recommendationBatch = 0;
-  try { localStorage.setItem(ONLINE_RECOMMEND_SORT_KEY, state.online.recommendationSort); } catch (_) {}
+  try { uiStorage.setItem(ONLINE_RECOMMEND_SORT_KEY, state.online.recommendationSort); } catch (_) {}
   loadOnlineRecommendations({ poll: true }).catch((error) => toast(error.message, 'error'));
 });
 $('#online-profile-tags').addEventListener('click', (event) => {
@@ -3994,7 +4059,7 @@ $('#online-search-form').addEventListener('click', (event) => {
   }
   if (event.target.closest('#online-clear-history')) {
     state.online.recentSearches = [];
-    try { localStorage.removeItem(ONLINE_SEARCH_HISTORY_KEY); } catch (_) {}
+    try { uiStorage.removeItem(ONLINE_SEARCH_HISTORY_KEY); } catch (_) {}
     renderOnlineSearchAssists();
     return;
   }
@@ -4104,9 +4169,10 @@ document.addEventListener('contextmenu', (event) => {
 });
 
 async function init() {
-  applyTheme(document.documentElement.dataset.theme, { persist: false });
+  await loadUiPreferences().catch((error) => toast(`偏好读取失败：${error.message}`, 'error'));
+  applyTheme(uiStorage.getItem(THEME_STORAGE_KEY) || document.documentElement.dataset.theme, { persist: false });
   try {
-    const savedOnlineSearches = JSON.parse(localStorage.getItem(ONLINE_SEARCH_HISTORY_KEY) || '[]');
+    const savedOnlineSearches = JSON.parse(uiStorage.getItem(ONLINE_SEARCH_HISTORY_KEY) || '[]');
     state.online.recentSearches = Array.isArray(savedOnlineSearches)
       ? savedOnlineSearches.filter((item) => item && typeof item.query === 'string').slice(0, 8).map((item) => ({ query: item.query, mode: item.mode || 'site' }))
       : [];
@@ -4114,22 +4180,22 @@ async function init() {
     state.online.recentSearches = [];
   }
   try {
-    const savedExcludedTags = JSON.parse(localStorage.getItem(ONLINE_RECOMMEND_EXCLUDED_TAGS_KEY) || '[]');
+    const savedExcludedTags = JSON.parse(uiStorage.getItem(ONLINE_RECOMMEND_EXCLUDED_TAGS_KEY) || '[]');
     state.online.excludedRecommendationTags = Array.isArray(savedExcludedTags)
       ? uniqueRecommendationTags(savedExcludedTags)
       : [];
   } catch (_) {
     state.online.excludedRecommendationTags = [];
   }
-  $('#density-select').value = localStorage.getItem('jmshelf-density') || 'comfortable';
-  const savedRecommendationSort = localStorage.getItem(ONLINE_RECOMMEND_SORT_KEY) || 'diverse';
+  $('#density-select').value = uiStorage.getItem('jmshelf-density') || 'comfortable';
+  const savedRecommendationSort = uiStorage.getItem(ONLINE_RECOMMEND_SORT_KEY) || 'diverse';
   state.online.recommendationSort = [...$('#online-recommendation-sort').options].some((option) => option.value === savedRecommendationSort)
     ? savedRecommendationSort
     : 'diverse';
   $('#online-recommendation-sort').value = state.online.recommendationSort;
   renderRecommendationTagFilter();
-  state.libraryFilter = localStorage.getItem('jmshelf-library-filter') || 'all';
-  const savedSort = localStorage.getItem('jmshelf-library-sort') || 'updated';
+  state.libraryFilter = uiStorage.getItem('jmshelf-library-filter') || 'all';
+  const savedSort = uiStorage.getItem('jmshelf-library-sort') || 'updated';
   state.librarySort = [...$('#library-sort').options].some((option) => option.value === savedSort) ? savedSort : 'updated';
   $('#library-sort').value = state.librarySort;
   setOnlineView(state.online.view);

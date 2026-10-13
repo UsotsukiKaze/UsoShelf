@@ -280,15 +280,22 @@ class LibraryDatabase:
             ).fetchone()
         return self.get_comic(row["comic_id"]) if row else None
 
-    def upsert_comic(self, data: dict[str, Any]) -> dict[str, Any]:
+    def upsert_comic(self, data: dict[str, Any], *, preserve_storage: bool = False) -> dict[str, Any]:
         # Parallel download jobs can finish the same source chapter together.
         with self.lock:
-            return self._upsert_comic_locked(data)
+            return self._upsert_comic_locked(data, preserve_storage=preserve_storage)
 
-    def _upsert_comic_locked(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _upsert_comic_locked(self, data: dict[str, Any], *, preserve_storage: bool = False) -> dict[str, Any]:
         existing = self.get_comic(data.get("id", "")) if data.get("id") else None
         if existing is None and data.get("sourceId"):
             existing = self.get_comic_by_source(str(data["sourceId"]))
+        if preserve_storage and existing and existing.get("rootPath"):
+            incoming_kind = data.get("storageKind")
+            saved = existing.get("storageKind") in {"local", "download"}
+            if incoming_kind == "remote" or (incoming_kind == "cache" and saved):
+                data = {**data, **{key: existing[key] for key in (
+                    "rootPath", "storageKind", "coverPath", "pageCount",
+                )}}
         comic_id = existing["id"] if existing else str(uuid.uuid4())
         timestamp = now_iso()
 
@@ -384,9 +391,11 @@ class LibraryDatabase:
         assert comic is not None
         return comic
 
-    def update_comic(self, comic_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
-        comic = self.get_comic(comic_id)
-        return self.upsert_comic({**comic, **patch, "id": comic_id}) if comic else None
+    def update_comic(self, comic_id: str, patch: dict[str, Any], *, preserve_storage: bool = False) -> dict[str, Any] | None:
+        with self.lock:
+            if not self.get_comic(comic_id):
+                return None
+            return self._upsert_comic_locked({**patch, "id": comic_id}, preserve_storage=preserve_storage)
 
     def record_comic_open(self, comic_id: str) -> dict[str, Any] | None:
         """Count reader sessions atomically instead of inflating the count on every page turn."""
@@ -436,24 +445,33 @@ class LibraryDatabase:
                 )
             return cursor.rowcount
 
-    def list_library_series(self) -> list[dict[str, Any]]:
+    def list_library_series(self, *, series_id: str | None = None) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.connection.execute(
-                "SELECT * FROM library_series ORDER BY created_at DESC"
+                "SELECT * FROM library_series" + (" WHERE id = ?" if series_id else "") + " ORDER BY created_at DESC",
+                (series_id,) if series_id else (),
             ).fetchall()
+            links = self.connection.execute(
+                "SELECT series_id, comic_id FROM library_series_members" +
+                (" WHERE series_id = ?" if series_id else "") + " ORDER BY position",
+                (series_id,) if series_id else (),
+            ).fetchall()
+            comic_rows = self.connection.execute(
+                self._comic_select() + (" WHERE c.id IN (SELECT comic_id FROM library_series_members WHERE series_id = ?)" if series_id else
+                " WHERE c.id IN (SELECT comic_id FROM library_series_members)"),
+                (series_id,) if series_id else (),
+            ).fetchall()
+            by_id = {row["id"]: self._comic(row) for row in comic_rows}
+            by_series: dict[str, list[dict[str, Any]]] = {}
+            for link in links:
+                comic = by_id.get(link["comic_id"])
+                if comic:
+                    by_series.setdefault(link["series_id"], []).append(comic)
             result: list[dict[str, Any]] = []
             for row in rows:
-                member_rows = self.connection.execute(
-                    """
-                    SELECT comic_id FROM library_series_members
-                    WHERE series_id = ? ORDER BY position
-                    """,
-                    (row["id"],),
-                ).fetchall()
-                members = [self.get_comic(member["comic_id"]) for member in member_rows]
-                members = [member for member in members if member is not None]
+                members = by_series.get(row["id"], [])
                 kind = row["kind"] if row["kind"] in {"custom", "source"} else "custom"
-                if len(members) < 2 and kind != "source":
+                if not members or (len(members) < 2 and kind != "source"):
                     continue
                 first = members[0]
                 read_members = [member for member in members if member.get("lastReadAt")]
@@ -503,7 +521,8 @@ class LibraryDatabase:
             return result
 
     def get_library_series(self, series_id: str) -> dict[str, Any] | None:
-        return next((item for item in self.list_library_series() if item["id"] == series_id), None)
+        items = self.list_library_series(series_id=series_id)
+        return items[0] if items else None
 
     def create_library_series(self, comic_ids: list[str], *, kind: str = "custom") -> dict[str, Any]:
         ordered_ids = list(dict.fromkeys(str(comic_id) for comic_id in comic_ids if comic_id))
@@ -535,7 +554,7 @@ class LibraryDatabase:
                     "INSERT INTO library_series_members (series_id, comic_id, position) VALUES (?, ?, ?)",
                     [(series_id, comic_id, position) for position, comic_id in enumerate(ordered_ids)],
                 )
-        return next(item for item in self.list_library_series() if item["id"] == series_id)
+        return self.get_library_series(series_id)
 
     def ensure_library_series(self, comic_ids: list[str], *, kind: str = "custom") -> dict[str, Any] | None:
         ordered_ids = list(dict.fromkeys(str(comic_id) for comic_id in comic_ids if comic_id))
@@ -585,7 +604,7 @@ class LibraryDatabase:
                     "UPDATE library_series_members SET position = ? WHERE series_id = ? AND comic_id = ?",
                     [(position, series_id, row["comic_id"]) for position, row in enumerate(rows)],
                 )
-        return next((item for item in self.list_library_series() if item["id"] == series_id), None)
+        return self.get_library_series(series_id)
 
     def ensure_source_series(self, source_series_id: str) -> dict[str, Any] | None:
         clean_source_id = str(source_series_id or "").strip()
@@ -602,7 +621,9 @@ class LibraryDatabase:
         """Backfill update tracking for source albums that currently have one chapter."""
         with self.lock:
             rows = self.connection.execute(
-                "SELECT DISTINCT series_id FROM comics WHERE series_id IS NOT NULL AND trim(series_id) != ''"
+                """SELECT DISTINCT c.series_id FROM comics c
+                WHERE c.series_id IS NOT NULL AND trim(c.series_id) != ''
+                AND NOT EXISTS (SELECT 1 FROM library_series_members m WHERE m.comic_id = c.id)"""
             ).fetchall()
         for row in rows:
             self.ensure_source_series(str(row["series_id"]))
@@ -882,6 +903,12 @@ class LibraryDatabase:
                 if not first_photo_id and episode_manifest:
                     first_photo_id = str(episode_manifest[0]["sourceId"])
                 details_complete = bool(current.get("detailsComplete")) or bool(incoming.get("detailsComplete"))
+                if (incoming.get("updatedAtSource") and current.get("updatedAtSource")
+                    and str(incoming["updatedAtSource"]) > str(current["updatedAtSource"])
+                    and not incoming.get("detailsComplete")):
+                    details_complete = False
+                    episode_manifest = []
+                    first_photo_id = ""
                 fetched_at = str(incoming.get("fetchedAt") or "").strip()
                 if not fetched_at:
                     fetched_at = str(current.get("fetchedAt") or "") or now_iso()

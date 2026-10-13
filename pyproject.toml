@@ -1,12 +1,14 @@
 [project]
 name = "jmshelf"
-version = "1.3.6"
+version = "1.3.7"
 description = "Local-only Windows comic library and reader"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.116",
     "jmcomic",
     "pillow>=11.3",
+    "packaging>=24",
+    "pycryptodome>=3.23",
     "pystray>=0.19.5",
     "pywebview>=6.1",
     "uvicorn>=0.35",

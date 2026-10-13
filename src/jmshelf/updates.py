@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ class SeriesUpdateChecker:
         initial_delay_seconds: float = 2,
         enqueue_updates: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
         task_status: Callable[[dict[str, Any]], str] | None = None,
+        update_wait_seconds: float = 600,
     ) -> None:
         self.database = database
         self.provider = provider
@@ -31,6 +33,8 @@ class SeriesUpdateChecker:
         self.initial_delay_seconds = max(0.0, initial_delay_seconds)
         self.enqueue_updates = enqueue_updates
         self.task_status = task_status
+        self.update_wait_seconds = max(0.0, update_wait_seconds)
+        self._tracked_tasks: dict[str, list[dict[str, Any]]] = {}
         self._closing = threading.Event()
         self._worker: threading.Thread | None = None
         self._lock = threading.RLock()
@@ -44,6 +48,7 @@ class SeriesUpdateChecker:
             "failedCount": 0,
             "updateCompletedCount": 0,
             "updateFailedCount": 0,
+            "updatePendingCount": 0,
             "updates": [],
         }
 
@@ -64,7 +69,8 @@ class SeriesUpdateChecker:
         if last_checked is None:
             return True
         now = current_time or datetime.now(UTC)
-        return now - last_checked.astimezone(UTC) >= self.check_interval
+        interval = min(self.check_interval, timedelta(minutes=15)) if series.get("updateError") else self.check_interval
+        return now - last_checked.astimezone(UTC) >= interval
 
     def check(self, series_id: str) -> dict[str, Any]:
         series = self.database.get_library_series(series_id)
@@ -113,6 +119,7 @@ class SeriesUpdateChecker:
                 self._checking.discard(series_id)
 
     def check_due(self) -> list[dict[str, Any]]:
+        self._poll_task_results()
         results: list[dict[str, Any]] = []
         for series in self.database.list_library_series():
             if self._closing.is_set():
@@ -159,7 +166,32 @@ class SeriesUpdateChecker:
         try:
             result["updateTasks"] = self.enqueue_updates(result)
         except Exception as exc:
+            result["updateTasks"] = list(getattr(exc, "update_tasks", []))
             result["updateError"] = str(exc) or type(exc).__name__
+            self.database.record_library_series_check(result["series"]["id"], error=result["updateError"])
+        if result.get("updateTasks"):
+            with self._lock:
+                self._tracked_tasks[result["series"]["id"]] = result["updateTasks"]
+
+    def _poll_task_results(self) -> None:
+        if self.task_status is None:
+            return
+        with self._lock:
+            tracked = list(self._tracked_tasks.items())
+        for series_id, tasks in tracked:
+            statuses = []
+            for task in tasks:
+                try:
+                    statuses.append(self.task_status(task))
+                except Exception:
+                    statuses.append("failed")
+            if any(status in {"queued", "running"} for status in statuses):
+                continue
+            if any(status != "completed" for status in statuses):
+                self.database.record_library_series_check(series_id, error="部分章节更新失败，将自动重试，也可手动重试")
+            with self._lock:
+                if self._tracked_tasks.get(series_id) == tasks:
+                    self._tracked_tasks.pop(series_id, None)
 
     def startup_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -210,7 +242,8 @@ class SeriesUpdateChecker:
         if tasks and self.task_status is not None:
             with self._lock:
                 self._startup_status["state"] = "updating"
-            while not self._closing.wait(0.5):
+            deadline = time.monotonic() + self.update_wait_seconds
+            while not self._closing.is_set():
                 statuses = []
                 for task in tasks:
                     try:
@@ -219,8 +252,12 @@ class SeriesUpdateChecker:
                         statuses.append("failed")
                 if all(status not in {"queued", "running"} for status in statuses):
                     break
+                if time.monotonic() >= deadline or self._closing.wait(min(0.5, max(0.0, deadline - time.monotonic()))):
+                    break
         completed_count = sum(status == "completed" for status in statuses)
-        failed_count = sum(status != "completed" for status in statuses)
+        failed_count = sum(status not in {"completed", "queued", "running"} for status in statuses)
+        pending_count = sum(status in {"queued", "running"} for status in statuses)
+        self._poll_task_results()
         with self._lock:
             self._startup_status.update({
                 "state": "complete",
@@ -228,7 +265,8 @@ class SeriesUpdateChecker:
                 "checkedCount": len(results),
                 "failedCount": max(0, eligible_count - len(results)),
                 "updateCompletedCount": completed_count,
-                "updateFailedCount": failed_count + sum(update["newCount"] for update in updates if update["error"]),
+                "updatePendingCount": pending_count,
+                "updateFailedCount": failed_count + sum(max(0, update["newCount"] - len(update["tasks"])) for update in updates if update["error"]),
                 "updates": updates,
             })
         while not self._closing.wait(self.poll_seconds):

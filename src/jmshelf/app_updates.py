@@ -14,13 +14,15 @@ import uuid
 import zipfile
 from copy import deepcopy
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import urlparse
+from packaging.version import InvalidVersion, Version
+
+from .release_signing import verify_release
 
 
 DEFAULT_MANIFEST_URL = "https://apps.usotsuki-kaze.com/releases/jmshelf/stable/latest.json"
-_VERSION_PART = re.compile(r"\d+")
 _SAFE_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}")
 _MAX_MANIFEST_BYTES = 512 * 1024
 _MAX_UNPACKED_BYTES = 1536 * 1024 * 1024
@@ -29,9 +31,11 @@ _UPDATER_READY_TIMEOUT = 90.0
 _APPLY_STATUS_SCHEMA = 1
 
 
-def version_key(value: str) -> tuple[int, ...]:
-    parts = tuple(int(part) for part in _VERSION_PART.findall(str(value)))
-    return parts or (0,)
+def version_key(value: str) -> Version:
+    try:
+        return Version(str(value).strip().split("+", 1)[0])
+    except InvalidVersion:
+        return Version("0")
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -123,6 +127,9 @@ class AppUpdateManager:
             or not parsed_package.path.casefold().endswith(".zip")
         ):
             raise ValueError("文件更新包必须是更新清单同域名下的 HTTPS ZIP 文件")
+        filename = PurePosixPath(parsed_package.path).name
+        if not filename or ":" in filename or "\\" in filename or filename.rstrip(" .") != filename:
+            raise ValueError("文件更新包文件名无效")
         sha256 = str(portable.get("sha256") or "").strip().upper()
         if not re.fullmatch(r"[0-9A-F]{64}", sha256):
             raise ValueError("更新清单中的 SHA-256 无效")
@@ -136,7 +143,10 @@ class AppUpdateManager:
         return clean
 
     def check(self) -> dict[str, Any]:
-        self._set_status(state="checking", error=None)
+        with self.lock:
+            if self.status.get("state") in {"checking", "downloading", "applying"}:
+                return self.snapshot()
+            self.status.update(state="checking", error=None)
         try:
             with self._opener().open(self._request(self.manifest_url), timeout=12) as response:
                 payload = response.read(_MAX_MANIFEST_BYTES + 1)
@@ -144,6 +154,8 @@ class AppUpdateManager:
                 raise ValueError("更新清单体积异常")
             manifest = self._validate_manifest(json.loads(payload.decode("utf-8-sig")))
             available = version_key(manifest["version"]) > version_key(self.current_version)
+            if available:
+                self._verify_release(manifest)
             with self.lock:
                 self.manifest = manifest
             self._set_status(
@@ -158,18 +170,20 @@ class AppUpdateManager:
                 stagedPath=None,
             )
         except Exception as exc:
-            self._set_status(state="error", error=f"检查更新失败：{exc}")
+            self._set_status(state="error", available=False, error=f"检查更新失败：{exc}")
         return self.snapshot()
 
     def start_download(self) -> dict[str, Any]:
         with self.lock:
-            if self.status["state"] == "downloading":
+            if self.status["state"] in {"downloading", "ready", "applying"}:
                 return self.snapshot()
+            if self.status["state"] == "checking":
+                raise ValueError("更新检查尚未完成")
             manifest = deepcopy(self.manifest)
             available = bool(self.status.get("available"))
-        if not manifest or not available:
-            raise ValueError("请先检查并确认存在新版本")
-        self._set_status(state="downloading", downloaded=0, progress=0, error=None)
+            if not manifest or not available:
+                raise ValueError("请先检查并确认存在新版本")
+            self.status.update(state="downloading", downloaded=0, progress=0, error=None)
         threading.Thread(target=self._download, args=(manifest,), name="jmshelf-app-update", daemon=True).start()
         return self.snapshot()
 
@@ -229,6 +243,15 @@ class AppUpdateManager:
                     time.sleep(min(3.0, 0.45 * attempt))
         raise RuntimeError(f"下载重试 {_DOWNLOAD_ATTEMPTS} 次后仍失败：{last_error}")
 
+    def _verify_release(self, manifest: dict[str, Any]) -> None:
+        version = manifest["version"]
+        url = f"https://github.com/UsotsukiKaze/UsoShelf/releases/download/v{version}/RELEASE_SIGNATURE.json"
+        with self._opener().open(self._request(url), timeout=15) as response:
+            payload = response.read(_MAX_MANIFEST_BYTES + 1)
+        if len(payload) > _MAX_MANIFEST_BYTES:
+            raise ValueError("发行签名体积异常")
+        verify_release(json.loads(payload.decode("utf-8-sig")), version, manifest["portable"])
+
     def _download(self, manifest: dict[str, Any]) -> None:
         package = manifest["portable"]
         version = manifest["version"]
@@ -237,6 +260,7 @@ class AppUpdateManager:
         target = target_dir / filename
         partial = target.with_suffix(target.suffix + ".part")
         try:
+            self._verify_release(manifest)
             target_dir.mkdir(parents=True, exist_ok=True)
             if target.is_file():
                 size, digest = self._hash_file(target)
@@ -272,7 +296,12 @@ class AppUpdateManager:
             with zipfile.ZipFile(archive) as bundle:
                 for entry in bundle.infolist():
                     relative = PurePosixPath(entry.filename.replace("\\", "/"))
-                    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                    windows_path = PureWindowsPath(entry.filename)
+                    if (relative.is_absolute() or windows_path.drive or windows_path.root
+                        or not relative.parts or ".." in relative.parts
+                        or any(":" in part or part.rstrip(" .") != part
+                               or part.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+                               for part in relative.parts)):
                         raise ValueError("文件更新包包含不安全路径")
                     unix_mode = entry.external_attr >> 16
                     if stat.S_ISLNK(unix_mode):
@@ -283,6 +312,8 @@ class AppUpdateManager:
                     if relative.parts[0].casefold() != "jmshelf":
                         raise ValueError("文件更新包目录结构无效")
                     destination = staged.joinpath(*relative.parts[1:])
+                    if not destination.resolve().is_relative_to(staged.resolve()):
+                        raise ValueError("文件更新包包含不安全路径")
                     if entry.is_dir():
                         destination.mkdir(parents=True, exist_ok=True)
                         continue

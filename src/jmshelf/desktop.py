@@ -504,6 +504,10 @@ def run_desktop() -> int:
 
 
 def self_test() -> int:
+    import base64
+    from Crypto.Signature import eddsa
+    from .release_signing import RELEASE_PUBLIC_KEY
+    eddsa.import_public_key(base64.b64decode(RELEASE_PUBLIC_KEY, validate=True))
     if not PUBLIC_ROOT.joinpath("index.html").is_file():
         return 10
     test_root = default_data_root().parent / "self-test"

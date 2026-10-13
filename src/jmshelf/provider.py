@@ -6,6 +6,7 @@ import math
 import shutil
 import threading
 import time
+import uuid
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -376,7 +377,7 @@ class JmcomicProvider:
     @staticmethod
     def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(path)
 
@@ -400,8 +401,8 @@ class JmcomicProvider:
             "excludedRecommendationTags": excluded,
             "updatedAt": datetime.now(UTC).isoformat(),
         }
-        self._write_json_file(self._preferences_store_path, preferences)
         with self._cache_lock:
+            self._write_json_file(self._preferences_store_path, preferences)
             self._preferences = preferences
         return self.online_preferences()
 
@@ -805,13 +806,15 @@ class JmcomicProvider:
         # An immediate click after launch should use the newly refreshed cookies
         # rather than racing the background login with a stale saved session.
         self._login_restore_done.wait(timeout=30)
-        account = self.auth_status()
+        with self._login_lock:
+            account = self.auth_status()
+            generation = self._cache_generation
         if not account["authenticated"]:
             raise ValueError("请先登录 JM 账号后查看收藏")
         with self._favorites_lock:
             with self._cache_lock:
                 cached = self._favorites_cache
-                if not fresh and cached and time.monotonic() - cached[0] < 5 * 60:
+                if not fresh and cached and cached[1].get("username") == account["username"] and time.monotonic() - cached[0] < 5 * 60:
                     return deepcopy(cached[1])
 
             username = str(account["username"])
@@ -842,6 +845,9 @@ class JmcomicProvider:
                         self._favorites_cache = None
                     restored = self.restore_login()
                     if restored.get("restored"):
+                        if self.auth_status().get("username") != username:
+                            raise ValueError("登录账号已变化，请重新读取收藏")
+                        generation = self._cache_generation
                         try:
                             first_page, page_count, pages = read_pages()
                         except Exception as retry_exc:
@@ -882,6 +888,8 @@ class JmcomicProvider:
                 "fetchedAt": datetime.now(UTC).isoformat(),
             }
             with self._cache_lock:
+                if generation != self._cache_generation or self.auth_status().get("username") != username:
+                    raise ValueError("登录账号已变化，请重新读取收藏")
                 self._favorites_cache = (time.monotonic(), deepcopy(result))
             return result
 
@@ -1021,7 +1029,7 @@ class JmcomicProvider:
         items = [item for item in items if item["albumId"]]
         partial_time_filter = False
         if extended_time:
-            today = datetime.now(UTC).date()
+            today = (datetime.now(UTC) + timedelta(hours=8)).date()
             if time_range == "quarter":
                 start, end = today - timedelta(days=92), today
             elif time_range == "year":
@@ -1036,29 +1044,16 @@ class JmcomicProvider:
                     raise ValueError("开始日期不能晚于结束日期")
 
             missing = [item for item in items if not item["publishedAt"]]
-            # The upstream search response omits dates. Hydrate a bounded result
-            # page so this extension remains responsive and honest about scope.
-            hydrate = missing[:32]
-            if hydrate:
-                clients = threading.local()
-
-                def hydrate_date(item: dict[str, Any]) -> tuple[str, str, str]:
-                    if not hasattr(clients, "client"):
-                        clients.client = self._new_query_client()
-                    with self._query_slot(background=background):
-                        album = self._get_album_detail(clients.client, item["albumId"])
-                    return (
-                        item["albumId"],
-                        self._search_date(getattr(album, "pub_date", "")),
-                        self._search_date(getattr(album, "update_date", "")),
-                    )
-
-                with ThreadPoolExecutor(max_workers=min(4, len(hydrate)), thread_name_prefix="jm-search-date") as executor:
-                    for album_id, published, updated in executor.map(hydrate_date, hydrate):
-                        item = next(candidate for candidate in items if candidate["albumId"] == album_id)
-                        item["publishedAt"] = published
-                        item["updatedAtSource"] = updated
-            partial_time_filter = len(missing) > len(hydrate)
+            # API album dates are often zero. Reuse the HTML-backed metadata
+            # index for this page; never scan other remote result pages here.
+            by_id = {item["albumId"]: item for item in items}
+            for offset in range(0, len(missing), 40):
+                hydrated = self.online_metadata([item["albumId"] for item in missing[offset:offset + 40]], background=background)
+                for metadata in hydrated["items"]:
+                    item = by_id[metadata["albumId"]]
+                    item["publishedAt"] = metadata.get("publishedAt") or ""
+                    item["updatedAtSource"] = metadata.get("updatedAtSource") or ""
+            partial_time_filter = any(not item["publishedAt"] for item in items)
             dated_items = []
             for item in items:
                 try:
@@ -1072,9 +1067,6 @@ class JmcomicProvider:
         page_size = int(getattr(result_page, "page_size", len(items) or 1) or 1)
         total = int(getattr(result_page, "total", len(items)) or len(items))
         page_count = int(getattr(result_page, "page_count", 1) or 1)
-        if extended_time:
-            total = len(items)
-            page_count = 1
         return {
             "query": clean_query,
             "page": page,
@@ -1084,6 +1076,7 @@ class JmcomicProvider:
             "items": items,
             "timeFilterMode": "page-post-filter" if extended_time else "upstream",
             "partialTimeFilter": partial_time_filter,
+            "matchedOnPage": len(items) if extended_time else None,
         }
 
     @staticmethod
@@ -1658,6 +1651,18 @@ class JmcomicProvider:
         self.schedule_home_refresh(delay=1.5)
         self.schedule_recommendation_refresh(delay=8.0)
 
+    @staticmethod
+    def metadata_is_fresh(metadata: dict[str, Any] | None) -> bool:
+        if not metadata or not metadata.get("detailsComplete") or not metadata.get("episodeManifest"):
+            return False
+        try:
+            fetched = datetime.fromisoformat(str(metadata.get("fetchedAt") or "").replace("Z", "+00:00"))
+            if fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=UTC)
+            return timedelta(0) <= datetime.now(UTC) - fetched <= timedelta(minutes=30)
+        except ValueError:
+            return False
+
     def online_metadata(self, album_ids: list[Any], *, background: bool = True) -> dict[str, Any]:
         ordered_ids = list(dict.fromkeys(
             source_id for value in album_ids if (source_id := normalize_plate(value))
@@ -1666,7 +1671,7 @@ class JmcomicProvider:
             return {"items": []}
 
         def complete(metadata: dict[str, Any] | None) -> bool:
-            return bool(metadata and metadata.get("detailsComplete") and metadata.get("episodeManifest"))
+            return self.metadata_is_fresh(metadata)
 
         stored_items = {
             item["albumId"]: item
@@ -1746,7 +1751,8 @@ class JmcomicProvider:
                         future.result()
                     except Exception:
                         continue
-        return {"items": self.database.get_online_metadata(ordered_ids)}
+        return {"items": [{**item, "metadataFresh": self.metadata_is_fresh(item)}
+                          for item in self.database.get_online_metadata(ordered_ids)]}
 
     @staticmethod
     def normalize_proxy(value: Any) -> str:
@@ -1898,7 +1904,7 @@ class JmcomicProvider:
             cached_items = self.database.get_online_metadata([source_id])
             cached = cached_items[0] if cached_items else None
             cached_manifest = list((cached or {}).get("episodeManifest") or [])
-            if cached_manifest and not fresh:
+            if cached_manifest and not fresh and self.metadata_is_fresh(cached):
                 return {
                     "seriesId": source_id,
                     "seriesTitle": str(cached.get("title") or f"JM{source_id}"),
@@ -1910,6 +1916,7 @@ class JmcomicProvider:
                 album = self._run_query(lambda client: self._get_album_detail(client, source_id))
             manifest = self._series_manifest(album)
             items = manifest.get("items") or []
+            dated = bool(self._search_date(getattr(album, "pub_date", "")) or self._search_date(getattr(album, "update_date", "")))
             self.database.upsert_online_metadata({
                 "albumId": str(album.id),
                 "title": str(getattr(album, "title", "") or ""),
@@ -1923,8 +1930,8 @@ class JmcomicProvider:
                 "pageCount": int(getattr(album, "page_count", 0) or 0),
                 "firstPhotoId": str(items[0]["sourceId"]) if items else source_id,
                 "episodeManifest": items,
-                "detailsComplete": True,
-                "fetchedAt": datetime.now(UTC).isoformat(),
+                "detailsComplete": dated,
+                "fetchedAt": datetime.now(UTC).isoformat() if dated else str((cached or {}).get("fetchedAt") or ""),
             })
             return manifest
 

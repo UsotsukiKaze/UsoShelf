@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
@@ -26,6 +27,7 @@ from .db import LibraryDatabase
 from .downloads import DownloadQueue, ProgressCallback
 from .importer import inspect_comic_folder, scan_import_root
 from .provider import JmcomicProvider
+from .preferences import UiPreferences
 from .updates import SeriesUpdateChecker
 from .utils import find_images, is_image, normalize_plate, path_is_inside
 from .windows import hide_foreground_to_tray, minimize_foreground_window, pick_folder, pick_image_file, reveal_in_explorer, stop_tray_icon
@@ -85,12 +87,13 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     database = LibraryDatabase(resolved_data / "library.sqlite3")
     database.ensure_source_subscriptions()
     provider = JmcomicProvider(database, resolved_data)
+    ui_preferences = UiPreferences(resolved_data / "ui-preferences.json")
     app_updates = AppUpdateManager(
         __version__,
         resolved_data / "updates",
         proxy_getter=lambda: database.get_setting("provider.proxy", ""),
     )
-    state = {"lastHeartbeat": time.monotonic()}
+    state = {"lastHeartbeat": time.monotonic(), "readerComicId": "", "previewAlbumId": ""}
     page_cache_lock = threading.RLock()
     page_cache: dict[str, tuple[str, list[dict[str, Any]]]] = {}
     storage_mutation_lock = threading.RLock()
@@ -136,7 +139,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                     "storageKind": storage_kind,
                     "sourceStatus": "matched",
                     "sourceError": None,
-                }))
+                }, preserve_storage=storage_kind == "cache"))
             else:
                 missing_items.append(f"JM{item.get('sourceId') or '?'}")
         if missing_items:
@@ -209,7 +212,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                             int(comic.get("pageCount") or 0),
                             int(patch.get("expectedPages") or 0),
                         ),
-                    })
+                    }, preserve_storage=True)
                     if updated:
                         registered_streams.add(active_source_id)
                         invalidate_comic_pages([str(comic["id"])])
@@ -284,6 +287,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     series_updates = SeriesUpdateChecker(database, provider)
 
     def streaming_page_limit(comic: dict[str, Any]) -> int | None:
+        if comic.get("storageKind") in {"local", "download"}:
+            return None
         source_id = str(comic.get("sourceId") or "")
         if not source_id:
             return None
@@ -346,30 +351,42 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         output_path = cache_root if cache_backed else series_update_output(series)
         tasks: list[dict[str, Any]] = []
         created_count = 0
+        enqueue_errors: list[str] = []
         for item in check["newItems"]:
             source_id = str(item["sourceId"])
             title = f"{series['displayName']} · {item['title']}"
-            if cache_backed:
-                task, created = caches.enqueue(
-                    source_id, output_path, title,
-                    {"selectedSourceIds": [source_id]},
-                )
-            else:
-                task, created = downloads.enqueue(source_id, output_path, title)
+            try:
+                if cache_backed:
+                    task, created = caches.enqueue(
+                        source_id, output_path, title,
+                        {"selectedSourceIds": [source_id]},
+                    )
+                else:
+                    task, created = downloads.enqueue(source_id, output_path, title)
+            except Exception as exc:
+                enqueue_errors.append(f"JM{source_id}：{exc}")
+                continue
             tasks.append({**task, "queueKind": "cache" if cache_backed else "download"})
             created_count += int(created)
+        if enqueue_errors:
+            database.record_library_series_check(series["id"], error="；".join(enqueue_errors))
         return {
             "tasks": tasks,
             "queuedCount": created_count,
             "outputPath": str(output_path),
             "queueKind": "cache" if cache_backed else "download",
+            "updateError": "；".join(enqueue_errors),
         }
 
     def automatic_series_updates(check: dict[str, Any]) -> list[dict[str, Any]]:
-        return [
-            {"id": task["id"], "sourceId": task["sourceId"], "queueKind": task["queueKind"]}
-            for task in enqueue_series_updates(check)["tasks"]
-        ]
+        queued = enqueue_series_updates(check)
+        tasks = [{"id": task["id"], "sourceId": task["sourceId"], "queueKind": task["queueKind"]}
+                 for task in queued["tasks"]]
+        if queued["updateError"]:
+            error = RuntimeError(queued["updateError"])
+            error.update_tasks = tasks
+            raise error
+        return tasks
 
     def series_update_task_status(task_ref: dict[str, Any]) -> str:
         queue = caches if task_ref.get("queueKind") == "cache" else downloads
@@ -691,6 +708,10 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         }
 
     def prune_library_cache(limit: int = 8) -> dict[str, Any]:
+        with storage_mutation_lock:
+            return _prune_library_cache(limit)
+
+    def _prune_library_cache(limit: int = 8) -> dict[str, Any]:
         """Keep the eight most recently used cache-backed chapters.
 
         Source-series members are deliberately counted one chapter at a time,
@@ -702,10 +723,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             if comic.get("storageKind") == "cache" and comic.get("rootPath")
         ]
         cached.sort(
-            key=lambda comic: (
-                str(comic.get("lastReadAt") or ""),
-                str(comic.get("updatedAt") or comic.get("createdAt") or ""),
-            ),
+            key=lambda comic: max(str(comic.get("lastReadAt") or ""), str(comic.get("updatedAt") or comic.get("createdAt") or "")),
             reverse=True,
         )
         if len(cached) <= maximum:
@@ -719,8 +737,18 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             active_sources.update(
                 str(value) for value in (task.get("context") or {}).get("selectedSourceIds", [])
             )
+        protected_ids: set[str] = set()
+        reader_id = str(state.get("readerComicId") or "")
+        if reader_id and time.monotonic() - state["lastHeartbeat"] <= 90:
+            protected_ids.add(reader_id)
+            next_comic = database.get_next_source_series_member(reader_id)
+            if next_comic:
+                protected_ids.add(str(next_comic["id"]))
+        protected_cached = [comic for comic in cached if str(comic["id"]) in protected_ids]
+        ordinary = [comic for comic in cached if str(comic["id"]) not in protected_ids]
+        keep = max(0, maximum - len(protected_cached))
         removable = [
-            comic for comic in cached[maximum:]
+            comic for comic in ordinary[keep:]
             if str(comic.get("sourceId") or "") not in active_sources
             and str(comic.get("seriesId") or "") not in active_sources
         ]
@@ -804,6 +832,24 @@ def create_app(data_root: Path | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def local_mutation_guard(request: Request, call_next):
+        allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+        if "pytest" in sys.modules:
+            allowed_hosts.add("testserver")
+        if request.url.hostname not in allowed_hosts:
+            return JSONResponse(status_code=403, content={"error": "请求主机无效"})
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                source = urlsplit(origin)
+                target = urlsplit(str(request.url))
+                if (source.scheme, source.hostname, source.port or (443 if source.scheme == "https" else 80)) != (
+                    target.scheme, target.hostname, target.port or (443 if target.scheme == "https" else 80)
+                ):
+                    raise ValueError("cross origin")
+            except ValueError:
+                return JSONResponse(status_code=403, content={"error": "请求来源无效"})
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse(status_code=403, content={"error": "请求来源无效"})
         if request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD"}:
             if request.headers.get("x-jmshelf-request") != "1":
                 return JSONResponse(status_code=403, content={"error": "请求来源无效"})
@@ -834,6 +880,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
 
     @app.post("/api/activity/focus")
     def activity_focus(payload: dict[str, Any] = Body(default_factory=dict)):
+        state["readerComicId"] = str(payload.get("comicId") or "")
+        state["previewAlbumId"] = normalize_plate(payload.get("previewAlbumId")) or ""
         return provider.set_activity_focus(str(payload.get("scope") or "library"))
 
     @app.get("/api/provider/status")
@@ -910,7 +958,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 "storageKind": "remote",
                 "sourceStatus": "matched",
                 "sourceError": None,
-            })
+            }, preserve_storage=True)
             for item in items
         ]
         source_series_ids = list(dict.fromkeys(
@@ -996,9 +1044,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 item["firstPhotoId"] = str(cached.get("firstPhotoId") or manifest[0].get("sourceId") or "")
                 item["latestSourceId"] = str(manifest[-1].get("sourceId") or "")
                 item["isSourceSeries"] = len(manifest) > 1
-            item["metadataLoaded"] = bool(
-                cached.get("detailsComplete") and manifest
-            )
+            item["metadataLoaded"] = provider.metadata_is_fresh(cached)
         local_comics = database.list_comics()
         local_by_source: dict[str, list[dict[str, Any]]] = {}
         for comic in local_comics:
@@ -1123,36 +1169,36 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         )
 
     def prune_preview_cache(current_album_id: str) -> None:
-        """Keep four recently used preview albums; active workers always win."""
+        """Count individual chapters across albums, and expire idle previews."""
         with preview_prune_lock, preview_state_lock:
             if not preview_root.is_dir():
                 return
-            protected_ids = {
-                source_id
-                for source_id, session in preview_sessions.items()
-                if source_id == current_album_id
-                or session.get("status") == "loading"
-            }
-            folders: list[Path] = []
-            for folder in preview_root.iterdir():
-                try:
-                    resolved = folder.resolve()
-                    if folder.is_dir() and path_is_inside(preview_root, resolved):
-                        folders.append(resolved)
-                except OSError:
-                    continue
-            protected_folders = {
-                (preview_root / f"JM{source_id}").resolve()
-                for source_id in protected_ids
-            }
-            candidates = sorted(
-                (folder for folder in folders if folder not in protected_folders),
-                key=lambda folder: folder.stat().st_mtime,
-                reverse=True,
-            )
-            reserved = len(protected_ids)
-            keep_count = max(0, 4 - reserved)
-            stale_candidates = candidates[keep_count:]
+            protected: list[Path] = []
+            for source_id, session in preview_sessions.items():
+                reading = source_id == state.get("previewAlbumId") and time.monotonic() - state["lastHeartbeat"] <= 90
+                if session.get("status") == "loading":
+                    protected.append((preview_root / f"JM{source_id}").resolve())
+                elif source_id == current_album_id or reading:
+                    raw_root = str(session.get("rootPath") or "")
+                    if raw_root:
+                        protected.append(Path(raw_root).resolve())
+            chapters: list[Path] = []
+            for directory, directories, filenames in os.walk(preview_root, followlinks=False):
+                folder = Path(directory).resolve()
+                directories[:] = [name for name in directories if path_is_inside(preview_root, folder / name)
+                                  and not (folder / name).is_symlink()]
+                if folder != preview_root and any(is_image(folder / name) for name in filenames):
+                    chapters.append(folder)
+                    directories[:] = []
+                elif folder.parent == preview_root and not directories:
+                    chapters.append(folder)
+            protected_chapters = [folder for folder in chapters if any(path_is_inside(parent, folder) for parent in protected)]
+            candidates = sorted((folder for folder in chapters if folder not in protected_chapters),
+                                key=lambda folder: folder.stat().st_mtime, reverse=True)
+            keep_count = max(0, 4 - len(protected_chapters))
+            now = time.time()
+            stale_candidates = [folder for index, folder in enumerate(candidates)
+                                if index >= keep_count or now - folder.stat().st_mtime >= 60 * 60]
             for stale in stale_candidates:
                 shutil.rmtree(stale, ignore_errors=True)
                 for source_id, session in list(preview_sessions.items()):
@@ -1160,6 +1206,15 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                     session_root = Path(raw_root).resolve() if raw_root else None
                     if session.get("status") != "loading" and session_root and path_is_inside(stale, session_root):
                         preview_sessions.pop(source_id, None)
+            # Remove empty album/series containers after pruning their chapters.
+            for directory, _directories, _files in os.walk(preview_root, topdown=False, followlinks=False):
+                folder = Path(directory)
+                if folder == preview_root or any(path_is_inside(parent, folder) for parent in protected):
+                    continue
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
             now = time.monotonic()
             for source_id, session in list(preview_sessions.items()):
                 folder = (preview_root / f"JM{source_id}").resolve()
@@ -1193,7 +1248,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             stored = preview_sessions.get(album_id)
             if stored:
                 stored["lastAccessMonotonic"] = time.monotonic()
-                preview_folder = preview_root / f"JM{album_id}"
+                preview_folder = Path(str(stored.get("rootPath") or preview_root / f"JM{album_id}"))
                 if preview_folder.is_dir():
                     try:
                         os.utime(preview_folder, None)
@@ -1240,7 +1295,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                     or str(existing.get("requestedSourceId") or existing.get("sourceId") or "") == requested_source_id
                 )
             )
-            if existing and existing.get("status") == "loading" and same_chapter:
+            cancelled = bool(existing and existing.get("cancelEvent") and existing["cancelEvent"].is_set())
+            if existing and existing.get("status") == "loading" and same_chapter and not cancelled:
                 existing["lastAccessMonotonic"] = time.monotonic()
                 should_start = False
             elif existing and existing_pages and existing.get("status") == "ready" and same_chapter:
@@ -1412,6 +1468,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                         if "lookup_hint" in parameters:
                             keyword_args["lookup_hint"] = lookup_hint
                         result = provider.download(album_id, current_folder, **keyword_args)
+                    if cancel_event.is_set():
+                        raise RuntimeError("在线预览已取消")
                     downloaded = next(
                         (item for item in result.get("items", []) if str(item.get("sourceId")) == source_id),
                         None,
@@ -1622,6 +1680,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         comic = database.record_comic_open(comic_id)
         if not comic:
             raise _error(404, "未找到本子")
+        state["readerComicId"] = comic_id
         try:
             cache_next_source_chapter(comic_id)
         except ValueError:
@@ -1811,6 +1870,14 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     def retry_download(task_id: str):
         task, created = downloads.retry(task_id)
         return {"task": task, "created": created}
+
+    @app.get("/api/ui/preferences")
+    def get_ui_preferences():
+        return ui_preferences.snapshot()
+
+    @app.patch("/api/ui/preferences")
+    def save_ui_preferences(payload: dict[str, Any] = Body(default_factory=dict)):
+        return ui_preferences.update(payload.get("values", {}))
 
     @app.get("/api/settings")
     def get_settings():

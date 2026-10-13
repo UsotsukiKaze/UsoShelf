@@ -108,6 +108,8 @@ uv run python scripts/prepare-release.py
 
 包体只作为 Release 附件发布，**不加入 Git 历史**。
 
+应用内更新另使用 Ed25519 发布签名。`scripts/prepare-release.py` 会生成并校验 `RELEASE_SIGNATURE.json`，发行时须与两个包体和 `SHA256SUMS.txt` 一同上传。更新私钥由 `scripts/configure-release-signing.py` 配置并加密保存在被 Git 忽略的本机 data 目录，应用只携带公钥。详细修复与维护记录见 [代码审查修复记录](docs/CODE_REVIEW_FIXES_2026-10-13.md)。
+
 已补档的重要旧版本见 [历史版本索引](docs/HISTORICAL_RELEASES.md)。历史标签仅保存原包归档说明与校验记录，不含当时源码；可构建源码从 `v1.3.4` 开始。
 
 ## 项目结构

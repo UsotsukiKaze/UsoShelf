@@ -35,8 +35,10 @@ def write_update_zip(path: Path, *, unsafe_name: str | None = None) -> None:
 
 def test_version_key_handles_semantic_and_prefixed_versions() -> None:
     assert version_key("v1.10.2") > version_key("1.9.9")
-    assert version_key("1.0.0") == (1, 0, 0)
-    assert version_key("preview") == (0,)
+    assert version_key("1.0.0") == version_key("1.0")
+    assert version_key("preview") == version_key("0")
+    assert version_key("1.3.6-beta.1") < version_key("1.3.6")
+    assert version_key("1.3.6+build.9") == version_key("1.3.6")
 
 
 def test_manifest_validation_requires_same_https_zip_host(tmp_path: Path) -> None:
