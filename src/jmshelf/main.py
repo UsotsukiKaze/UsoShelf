@@ -26,7 +26,7 @@ from .app_updates import AppUpdateManager
 from .db import LibraryDatabase
 from .downloads import DownloadQueue, ProgressCallback
 from .importer import inspect_comic_folder, scan_import_root
-from .provider import JmcomicProvider
+from .provider import JmcomicProvider, QueryCancelled
 from .preferences import UiPreferences
 from .updates import SeriesUpdateChecker
 from .utils import find_images, is_image, normalize_plate, path_is_inside
@@ -102,6 +102,44 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     preview_prune_lock = threading.Lock()
     preview_threads: set[threading.Thread] = set()
     preview_cleanup_stop = threading.Event()
+    online_query_events: dict[str, tuple[threading.Event, float]] = {}
+    online_query_lock = threading.Lock()
+
+    async def run_online_query(token: str, operation, *args, **kwargs):
+        with online_query_lock:
+            for key, (_, timestamp) in list(online_query_events.items()):
+                if time.monotonic() - timestamp > 300:
+                    online_query_events.pop(key, None)
+            event = online_query_events.setdefault(token, (threading.Event(), time.monotonic()))[0] if token else threading.Event()
+
+        def run():
+            with provider.cancellable_queries(event):
+                return operation(*args, **kwargs)
+
+        try:
+            result = await asyncio.to_thread(run)
+            if event.is_set():
+                raise QueryCancelled("查询已取消")
+            return result
+        except QueryCancelled:
+            raise _error(499, "查询已取消")
+        except asyncio.CancelledError:
+            event.set()
+            raise
+        finally:
+            with online_query_lock:
+                if token and not event.is_set():
+                    online_query_events.pop(token, None)
+
+    def cancel_online_query(payload: dict[str, Any] = Body(default_factory=dict)):
+        token = str(payload.get("requestToken") or "")[:96]
+        if token:
+            with online_query_lock:
+                if len(online_query_events) >= 256:
+                    oldest = min(online_query_events, key=lambda key: online_query_events[key][1])
+                    online_query_events.pop(oldest, None)
+                online_query_events.setdefault(token, (threading.Event(), time.monotonic()))[0].set()
+        return {"ok": True}
 
     def cached_comic_pages(comic: dict[str, Any] | None, *, refresh: bool = False) -> list[dict[str, Any]]:
         if not comic:
@@ -137,6 +175,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                     **inspected,
                     **item,
                     "storageKind": storage_kind,
+                    "storageComplete": True,
                     "sourceStatus": "matched",
                     "sourceError": None,
                 }, preserve_storage=storage_kind == "cache"))
@@ -155,6 +194,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             if (series := database.ensure_source_series(source_series_id)) is not None
         ]
         library_series = library_series_items[0] if library_series_items else None
+        invalidate_comic_pages([comic["id"] for comic in comics])
         return {
             "result": result,
             "comics": comics,
@@ -193,6 +233,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         parameters = inspect.signature(provider.download).parameters
         progressive = bool(context.get("progressive"))
         registered_streams: set[str] = set()
+        stream_comic_ids: dict[str, str] = {}
 
         def cache_progress(patch: dict[str, Any]) -> None:
             if progressive and patch.get("streamReady"):
@@ -215,7 +256,10 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                     }, preserve_storage=True)
                     if updated:
                         registered_streams.add(active_source_id)
+                        stream_comic_ids[active_source_id] = str(comic["id"])
                         invalidate_comic_pages([str(comic["id"])])
+                if active_source_id in stream_comic_ids:
+                    invalidate_comic_pages([stream_comic_ids[active_source_id]])
             progress(patch)
 
         if "selected_source_ids" in parameters:
@@ -249,7 +293,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                         "seriesTitle": item["seriesTitle"],
                         "items": [item],
                     }
-            if context.get("readerAhead") and "transfer_priority" in parameters:
+            if (context.get("readerAhead") or context.get("readerForeground")) and "transfer_priority" in parameters:
                 keyword_args["transfer_priority"] = "reader_next"
             if "seed_page_paths" in parameters:
                 keyword_args["seed_page_paths"] = context.get("seedPagePaths") or {}
@@ -283,7 +327,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         return imported
 
     downloads = DownloadQueue(run_queued_download, state_path=resolved_data / "download-queue.json")
-    caches = DownloadQueue(run_queued_cache, state_path=resolved_data / "cache-queue.json")
+    caches = DownloadQueue(run_queued_cache, state_path=resolved_data / "cache-queue.json", reserve_reader=True)
     series_updates = SeriesUpdateChecker(database, provider)
 
     def streaming_page_limit(comic: dict[str, Any]) -> int | None:
@@ -322,7 +366,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             return None
         active = active_cache_task_for_source(str(next_comic["sourceId"]))
         if active:
-            caches.prioritize(str(active["id"]))
+            caches.prioritize(str(active["id"]), reader=False)
             return {"task": active, "created": False, "comic": next_comic}
         queued = enqueue_comic_caches(
             [next_comic["id"]],
@@ -530,6 +574,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         priority_comic_id: Any = None,
         seed_page_paths: dict[str, list[str]] | None = None,
         reader_ahead: bool = False,
+        reader_focus: bool = False,
     ) -> dict[str, Any]:
         ordered_ids = list(dict.fromkeys(str(comic_id) for comic_id in comic_ids if comic_id))
         if not ordered_ids:
@@ -585,7 +630,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 active = active_cache_task_for_source(selected_source_ids[0])
                 if active:
                     if priority_id and str(members[0]["id"]) == priority_id:
-                        caches.prioritize(str(active["id"]))
+                        caches.prioritize(str(active["id"]), reader=reader_focus)
                     tasks.append(active)
                     continue
             title = str(
@@ -594,6 +639,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 else members[0].get("seriesTitle") or members[0]["displayName"]
             )
             task_context: dict[str, Any] = {"selectedSourceIds": selected_source_ids}
+            if reader_focus and priority_id and any(str(member["id"]) == priority_id for member in members):
+                task_context["readerForeground"] = True
             reusable_pages = {
                 source_id: [str(path) for path in (seed_page_paths or {}).get(source_id, []) if path]
                 for source_id in selected_source_ids
@@ -618,7 +665,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 ),
             )
             if priority_id and any(str(member["id"]) == priority_id for member in members):
-                caches.prioritize(str(task["id"]))
+                caches.prioritize(str(task["id"]), reader=reader_focus)
             tasks.append(task)
             created_count += int(created)
         return {
@@ -810,6 +857,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             database.close()
 
     app = FastAPI(title="JmShelf", version=__version__, lifespan=lifespan)
+    app.add_api_route("/api/online/cancel", cancel_online_query, methods=["POST"])
     app.state.database = database
     app.state.provider = provider
     app.state.downloads = downloads
@@ -882,6 +930,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
     def activity_focus(payload: dict[str, Any] = Body(default_factory=dict)):
         state["readerComicId"] = str(payload.get("comicId") or "")
         state["previewAlbumId"] = normalize_plate(payload.get("previewAlbumId")) or ""
+        comic = database.get_comic(state["readerComicId"]) if state["readerComicId"] else None
+        provider.set_reader_source(str((comic or {}).get("sourceId") or ""))
         return provider.set_activity_focus(str(payload.get("scope") or "library"))
 
     @app.get("/api/provider/status")
@@ -902,10 +952,13 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         return provider.logout()
 
     @app.get("/api/provider/favorites")
-    async def provider_favorites(search: str = "", refresh: bool = False):
-        favorite_data = await asyncio.to_thread(provider.favorites, fresh=refresh)
+    async def provider_favorites(search: str = "", refresh: bool = False, page: int | None = Query(default=None, ge=1, le=500)):
+        arguments = {"fresh": refresh}
+        if page is not None:
+            arguments["page"] = page
+        favorite_data = await asyncio.to_thread(provider.favorites, **arguments)
         database.upsert_online_metadata_many(favorite_data.get("items", []))
-        local_comics = database.list_comics()
+        local_comics = database.get_comics_by_sources([str(item.get("albumId") or "") for item in favorite_data.get("items", [])])
         local_by_album: dict[str, list[dict[str, Any]]] = {}
         for comic in local_comics:
             keys = {
@@ -944,6 +997,13 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             "localComics": [comic for comic in local_comics if str(comic["id"]) in local_ids],
             "remoteItems": remote_items,
         }
+
+    @app.post("/api/provider/favorites/state")
+    def favorite_local_state(payload: dict[str, Any] = Body(default_factory=dict)):
+        ids = payload.get("albumIds", [])
+        if not isinstance(ids, list) or len(ids) > 10000:
+            raise ValueError("收藏状态请求无效")
+        return database.get_comics_by_sources([str(value) for value in ids if normalize_plate(value)])
 
     @app.post("/api/provider/favorites/{album_id}/shelf", status_code=202)
     async def add_provider_favorite_to_shelf(album_id: str):
@@ -989,13 +1049,15 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                     ]
                     if reusable:
                         preview_seeds[preview_source_id] = reusable
-        # Cache chapters as independent FIFO tasks. The first chapter becomes
-        # readable as soon as it finishes while later chapters keep filling in
-        # quietly instead of delaying the entire series import.
+        # Keep every chapter in the shelf, warming only the selected chapter
+        # and its successor. Reading advances this window automatically.
+        start_index = next((index for index, comic in enumerate(comics)
+                            if str(comic.get("sourceId")) in preview_seeds), 0)
+        warm_comics = comics[start_index:start_index + 2]
         cache_result = enqueue_comic_caches(
-            [comic["id"] for comic in comics],
+            [comic["id"] for comic in warm_comics],
             progressive=True,
-            priority_comic_id=comics[0]["id"] if comics else None,
+            priority_comic_id=warm_comics[0]["id"] if warm_comics else None,
             seed_page_paths=preview_seeds,
         )
         return {
@@ -1045,10 +1107,10 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 item["latestSourceId"] = str(manifest[-1].get("sourceId") or "")
                 item["isSourceSeries"] = len(manifest) > 1
             item["metadataLoaded"] = provider.metadata_is_fresh(cached)
-        local_comics = database.list_comics()
+        local_comics = database.get_comics_by_sources([str(item.get("albumId") or "") for item in items])
         local_by_source: dict[str, list[dict[str, Any]]] = {}
         for comic in local_comics:
-            for value in (comic.get("sourceId"), comic.get("seriesId")):
+            for value in {comic.get("sourceId"), comic.get("seriesId")}:
                 if value:
                     local_by_source.setdefault(str(value), []).append(comic)
         for item in items:
@@ -1065,12 +1127,8 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 and comic.get("rootPath")
                 for comic in matches
             )
-            item["fullyAvailable"] = bool(matches) and all(
-                comic.get("rootPath")
-                and (
-                    not int(comic.get("pageCount") or 0)
-                    or len(_comic_pages(comic)) >= int(comic.get("pageCount") or 0)
-                )
+            item["fullyAvailable"] = bool(matches) and len({comic["sourceId"] for comic in matches}) >= max(1, int(item.get("episodeCount") or 1)) and all(
+                comic.get("rootPath") and comic.get("storageComplete")
                 for comic in matches
             )
         return items
@@ -1085,9 +1143,10 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         category: str = "all",
         dateFrom: str = "",
         dateTo: str = "",
+        requestToken: str = Query(default="", max_length=96),
     ):
-        result = await asyncio.to_thread(
-            provider.search,
+        result = await run_online_query(
+            requestToken, provider.search,
             q,
             page=page,
             mode=mode,
@@ -1097,7 +1156,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             date_from=dateFrom,
             date_to=dateTo,
         )
-        result["items"] = annotate_online_items(result["items"])
+        result["items"] = await asyncio.to_thread(annotate_online_items, result["items"])
         return result
 
     @app.get("/api/online/preferences")
@@ -1115,6 +1174,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         batch: int = Query(default=0, ge=0, le=1000),
         sort: str = "diverse",
         excludeTag: list[str] = Query(default=[]),
+        refresh: bool = False,
     ):
         if sourceId:
             result = await asyncio.to_thread(
@@ -1132,15 +1192,16 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                 offset=batch,
                 order=sort,
                 excluded_tags=excludeTag,
+                refresh=refresh,
             )
-        result["items"] = annotate_online_items(result["items"])
+        result["items"] = await asyncio.to_thread(annotate_online_items, result["items"])
         return result
 
     @app.get("/api/online/home")
     async def online_home():
         result = await asyncio.to_thread(provider.home_feed)
         for section in result.get("sections", []):
-            section["items"] = annotate_online_items(section.get("items", []))
+            section["items"] = await asyncio.to_thread(annotate_online_items, section.get("items", []))
         return result
 
     @app.get("/api/online/categories")
@@ -1149,21 +1210,22 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         category: str = "all",
         sort: str = "latest",
         timeRange: str = "all",
+        requestToken: str = Query(default="", max_length=96),
     ):
-        result = await asyncio.to_thread(
-            provider.category_listing,
+        result = await run_online_query(
+            requestToken, provider.category_listing,
             page=page,
             category=category,
             order=sort,
             time_range=timeRange,
         )
-        result["items"] = annotate_online_items(result["items"])
+        result["items"] = await asyncio.to_thread(annotate_online_items, result["items"])
         return result
 
     @app.post("/api/online/metadata")
     async def online_metadata(payload: dict[str, Any] = Body(default_factory=dict)):
-        return await asyncio.to_thread(
-            provider.online_metadata,
+        return await run_online_query(
+            str(payload.get("requestToken") or "")[:96], provider.online_metadata,
             payload.get("albumIds", []),
             background=not bool(payload.get("priority")),
         )
@@ -1428,7 +1490,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
                             if root and path_is_inside(preview_root, root):
                                 update["rootPath"] = str(root)
                             current.update(update)
-                            if page_files:
+                            if page_files and len(page_files) >= len(current.get("pageFiles") or []):
                                 current["pageFiles"] = page_files
 
                     parameters = inspect.signature(provider.download).parameters
@@ -1663,8 +1725,10 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         comic = database.get_comic(comic_id)
         if not comic:
             raise _error(404, "未找到本子")
-        pages = cached_comic_pages(comic, refresh=True)
+        pages = cached_comic_pages(comic)
         stream_limit = streaming_page_limit(comic)
+        if stream_limit is None and not comic.get("storageComplete") and pages and len(pages) >= int(comic.get("pageCount") or 0):
+            database.update_comic(comic_id, {"storageComplete": True})
         return pages[:stream_limit] if stream_limit is not None else pages
 
     @app.put("/api/comics/{comic_id}/progress")
@@ -1681,6 +1745,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
         if not comic:
             raise _error(404, "未找到本子")
         state["readerComicId"] = comic_id
+        provider.set_reader_source(str(comic.get("sourceId") or ""))
         try:
             cache_next_source_chapter(comic_id)
         except ValueError:
@@ -1846,6 +1911,7 @@ def create_app(data_root: Path | None = None) -> FastAPI:
             payload.get("comicIds", []),
             progressive=bool(payload.get("progressive")),
             priority_comic_id=payload.get("priorityComicId"),
+            reader_focus=bool(payload.get("priorityComicId")),
         )
 
     @app.post("/api/caches/clear")

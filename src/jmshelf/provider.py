@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import hashlib
 import json
 import math
 import shutil
@@ -8,7 +9,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
@@ -21,6 +22,42 @@ from urllib.parse import urlparse
 from .credentials import WindowsCredentialStore
 from .db import LibraryDatabase
 from .utils import find_images, normalize_chapter_index, normalize_plate
+
+
+class QueryCancelled(RuntimeError):
+    pass
+
+
+def _load_image_window(images, apply, *, workers: int, cancel_event=None, window: int = 12) -> None:
+    """Refill free workers without waiting for a four-image batch barrier.
+
+    Keep a bounded distance ahead of the first unfinished image so one slow
+    page cannot cause the whole chapter to be speculatively fetched.
+    """
+    workers = max(1, workers)
+    window = max(workers, window)
+    next_index = first_pending = 0
+    completed: set[int] = set()
+    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="jm-image-window") as pool:
+        active = {}
+        try:
+            while next_index < len(images) or active:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("在线预览已取消")
+                while next_index < len(images) and len(active) < workers and next_index < first_pending + window:
+                    active[pool.submit(apply, images[next_index])] = next_index
+                    next_index += 1
+                done, _ = wait(active, timeout=.1, return_when=FIRST_COMPLETED)
+                for future in done:
+                    index = active.pop(future)
+                    future.result()
+                    completed.add(index)
+                while first_pending in completed:
+                    completed.remove(first_pending)
+                    first_pending += 1
+        finally:
+            for future in active:
+                future.cancel()
 
 
 class _PreviewAlbumContext:
@@ -234,7 +271,7 @@ class _PriorityQueryGate:
             self._condition.notify_all()
 
     @contextmanager
-    def slot(self, *, background: bool = False):
+    def slot(self, *, background: bool = False, cancel_event=None):
         with self._condition:
             if not background:
                 self._waiting_interactive += 1
@@ -250,7 +287,11 @@ class _PriorityQueryGate:
                         )
                     )
                 ):
-                    self._condition.wait()
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise QueryCancelled("查询已取消")
+                    self._condition.wait(.1)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise QueryCancelled("查询已取消")
                 self._active_total += 1
                 if background:
                     self._active_background += 1
@@ -295,10 +336,14 @@ class JmcomicProvider:
         self._lookup_cache: OrderedDict[tuple[str, bool], tuple[float, dict[str, Any]]] = OrderedDict()
         self._cache_lock = threading.RLock()
         self._cache_generation = 0
+        self._query_cancel_local = threading.local()
+        self._reader_source_id = ""
+        self._search_cache: OrderedDict[tuple, tuple[float, dict[str, Any]]] = OrderedDict()
         self._lookup_locks = [threading.Lock() for _ in range(16)]
         self._cover_locks = [threading.Lock() for _ in range(32)]
         self._cover_failures: OrderedDict[str, float] = OrderedDict()
         self._favorites_cache: tuple[float, dict[str, Any]] | None = None
+        self._favorites_page_cache: dict[int, tuple[float, int, dict[str, Any]]] = {}
         self._recommendations_cache: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
         self._favorites_lock = threading.Lock()
         self._login_lock = threading.RLock()
@@ -347,7 +392,9 @@ class JmcomicProvider:
             self._lookup_cache.clear()
             self._cover_failures.clear()
             self._favorites_cache = None
+            self._favorites_page_cache.clear()
             self._recommendations_cache = None
+            self._search_cache.clear()
 
     def set_activity_focus(self, scope: str) -> dict[str, Any]:
         selected = scope if scope in {"online", "library", "preview"} else "library"
@@ -355,14 +402,31 @@ class JmcomicProvider:
         self._query_gate.set_focus(selected)
         return {"focus": selected, "transfers": self._transfer_gate.snapshot(), "queries": self._query_gate.snapshot()}
 
+    def set_reader_source(self, source_id: str) -> None:
+        self._reader_source_id = normalize_plate(source_id) or ""
+
     @contextmanager
-    def _query_slot(self, *, background: bool = False):
+    def _query_slot(self, *, background: bool = False, cancel_event=None):
         # Signal image scheduling before waiting for one of the six query slots,
         # so queued user queries also stop new background transfers from
         # consuming the protected capacity.
+        event = cancel_event or getattr(self._query_cancel_local, "event", None)
         with self._transfer_gate.query():
-            with self._query_gate.slot(background=background):
+            with self._query_gate.slot(background=background, cancel_event=event):
                 yield
+                if event is not None and event.is_set():
+                    raise QueryCancelled("查询已取消")
+
+    @contextmanager
+    def cancellable_queries(self, event):
+        previous = getattr(self._query_cancel_local, "event", None)
+        self._query_cancel_local.event = event
+        try:
+            if event is not None and event.is_set():
+                raise QueryCancelled("查询已取消")
+            yield
+        finally:
+            self._query_cancel_local.event = previous
 
     @staticmethod
     def _read_json_file(path: Path) -> dict[str, Any] | None:
@@ -802,7 +866,7 @@ class JmcomicProvider:
         clean = str(value or "").strip()
         return [clean] if clean else []
 
-    def favorites(self, *, fresh: bool = False) -> dict[str, Any]:
+    def favorites(self, *, fresh: bool = False, page: int | None = None) -> dict[str, Any]:
         # An immediate click after launch should use the newly refreshed cookies
         # rather than racing the background login with a stale saved session.
         self._login_restore_done.wait(timeout=30)
@@ -813,8 +877,15 @@ class JmcomicProvider:
             raise ValueError("请先登录 JM 账号后查看收藏")
         with self._favorites_lock:
             with self._cache_lock:
+                if fresh:
+                    self._favorites_page_cache.clear()
+                    self._favorites_cache = None
+                if page is not None:
+                    cached_page = self._favorites_page_cache.get(page)
+                    if cached_page and cached_page[1] == generation and time.monotonic() - cached_page[0] < 300:
+                        return deepcopy(cached_page[2])
                 cached = self._favorites_cache
-                if not fresh and cached and cached[1].get("username") == account["username"] and time.monotonic() - cached[0] < 5 * 60:
+                if page is None and not fresh and cached and cached[1].get("username") == account["username"] and time.monotonic() - cached[0] < 5 * 60:
                     return deepcopy(cached[1])
 
             username = str(account["username"])
@@ -826,10 +897,10 @@ class JmcomicProvider:
                     )
 
             def read_pages() -> tuple[Any, int, dict[int, Any]]:
-                first_page = fetch_page(1)
+                first_page = fetch_page(page or 1)
                 page_count = max(1, int(getattr(first_page, "page_count", 1) or 1))
-                pages: dict[int, Any] = {1: first_page}
-                if page_count > 1:
+                pages: dict[int, Any] = {page or 1: first_page}
+                if page is None and page_count > 1:
                     workers = min(4, page_count - 1)
                     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="jmshelf-favorites") as executor:
                         futures = {executor.submit(fetch_page, page): page for page in range(2, page_count + 1)}
@@ -860,8 +931,8 @@ class JmcomicProvider:
             items: list[dict[str, Any]] = []
             seen: set[str] = set()
             for page_number in range(1, page_count + 1):
-                page = pages.get(page_number)
-                for raw_id, raw_info in getattr(page, "content", []) or []:
+                favorite_page = pages.get(page_number)
+                for raw_id, raw_info in getattr(favorite_page, "content", []) or []:
                     album_id = normalize_plate(raw_id)
                     if not album_id or album_id in seen:
                         continue
@@ -886,11 +957,19 @@ class JmcomicProvider:
                 "total": max(len(items), int(getattr(first_page, "total", len(items)) or len(items))),
                 "items": items,
                 "fetchedAt": datetime.now(UTC).isoformat(),
+                "page": page or 1,
+                "pageCount": page_count,
+                "hasMore": page is not None and page < page_count,
             }
             with self._cache_lock:
                 if generation != self._cache_generation or self.auth_status().get("username") != username:
                     raise ValueError("登录账号已变化，请重新读取收藏")
-                self._favorites_cache = (time.monotonic(), deepcopy(result))
+                if page is None:
+                    self._favorites_cache = (time.monotonic(), deepcopy(result))
+                else:
+                    self._favorites_page_cache[page] = (time.monotonic(), generation, deepcopy(result))
+                    while len(self._favorites_page_cache) > 32:
+                        self._favorites_page_cache.pop(next(iter(self._favorites_page_cache)))
             return result
 
     @staticmethod
@@ -975,6 +1054,12 @@ class JmcomicProvider:
         if not clean_query:
             raise ValueError("请输入搜索关键词")
         page = max(1, int(page or 1))
+        cache_key = (clean_query, page, mode, order, time_range, category, date_from, date_to, self._cache_generation)
+        with self._cache_lock:
+            cached = self._search_cache.get(cache_key)
+            if cached and time.monotonic() - cached[0] < 60:
+                self._search_cache.move_to_end(cache_key)
+                return deepcopy(cached[1])
         jmcomic = self._module()
         constants = jmcomic.JmMagicConstants
         modes = {
@@ -1067,7 +1152,7 @@ class JmcomicProvider:
         page_size = int(getattr(result_page, "page_size", len(items) or 1) or 1)
         total = int(getattr(result_page, "total", len(items)) or len(items))
         page_count = int(getattr(result_page, "page_count", 1) or 1)
-        return {
+        result = {
             "query": clean_query,
             "page": page,
             "pageSize": page_size,
@@ -1078,6 +1163,11 @@ class JmcomicProvider:
             "partialTimeFilter": partial_time_filter,
             "matchedOnPage": len(items) if extended_time else None,
         }
+        with self._cache_lock:
+            self._search_cache[cache_key] = (time.monotonic(), deepcopy(result))
+            while len(self._search_cache) > 64:
+                self._search_cache.popitem(last=False)
+        return result
 
     @staticmethod
     def _recommend_tokens(value: str) -> set[str]:
@@ -1406,12 +1496,27 @@ class JmcomicProvider:
             if comic.get("sourceId")
         })
 
+    def _recommendation_behavior_key(self) -> str:
+        behavior = sorted((
+            str(comic.get("sourceId") or ""), int(comic.get("readCount") or 0),
+            str(comic.get("lastReadAt") or "")[:10],
+            min(10, int(comic.get("progressPage") or 0) * 10 // max(1, int(comic.get("pageCount") or 0))),
+            sorted(comic.get("tags") or []), sorted(comic.get("authors") or []),
+            sorted(comic.get("collections") or []),
+        ) for comic in self.database.list_comics() if comic.get("sourceId"))
+        return hashlib.sha256(json.dumps(behavior, ensure_ascii=False).encode()).hexdigest()
+
     def schedule_recommendation_refresh(self, *, force: bool = False, delay: float = 0.0) -> dict[str, Any]:
         current_ids = self._current_recommendation_source_ids()
         snapshot_ids = set(str(value) for value in (self._recommendation_snapshot or {}).get("sourceIds", []))
         pending_count = len(set(current_ids) - snapshot_ids)
         changed_count = len(set(current_ids) ^ snapshot_ids)
         threshold = 10
+        behavior_key = self._recommendation_behavior_key()
+        try:
+            age = (datetime.now(UTC) - datetime.fromisoformat(str((self._recommendation_snapshot or {}).get("updatedAt") or "").replace("Z", "+00:00"))).total_seconds()
+        except (TypeError, ValueError):
+            age = float("inf")
         if not current_ids:
             return {"refreshing": False, "pendingNewItemCount": 0, "threshold": threshold, "emptyLibrary": True}
         should_refresh = (
@@ -1421,6 +1526,8 @@ class JmcomicProvider:
             or not isinstance(self._recommendation_snapshot.get("result"), dict)
             or pending_count >= threshold
             or changed_count >= threshold
+            or age >= 24 * 60 * 60
+            or (age >= 15 * 60 and behavior_key != (self._recommendation_snapshot or {}).get("behaviorKey"))
         )
         with self._background_lock:
             if not should_refresh or self._recommendation_refreshing:
@@ -1430,6 +1537,9 @@ class JmcomicProvider:
                     "threshold": threshold,
                 }
             self._recommendation_refreshing = True
+        if force:
+            with self._cache_lock:
+                self._recommendations_cache = None
 
         def worker() -> None:
             try:
@@ -1442,12 +1552,13 @@ class JmcomicProvider:
                     cached = deepcopy(self._recommendations_cache[2]) if self._recommendations_cache else None
                 if not cached:
                     return
-                snapshot_source_ids = self._current_recommendation_source_ids()
+                snapshot_source_ids = current_ids
                 payload = {
                     "schemaVersion": 3,
                     "updatedAt": datetime.now(UTC).isoformat(),
                     "sourceCount": len(snapshot_source_ids),
                     "sourceIds": snapshot_source_ids,
+                    "behaviorKey": behavior_key,
                     "result": cached,
                 }
                 self._write_json_file(self._recommendation_store_path, payload)
@@ -1469,8 +1580,9 @@ class JmcomicProvider:
         offset: int = 0,
         order: str = "diverse",
         excluded_tags: list[str] | tuple[str, ...] | None = None,
+        refresh: bool = False,
     ) -> dict[str, Any]:
-        refresh = self.schedule_recommendation_refresh()
+        refresh = self.schedule_recommendation_refresh(force=True) if refresh else self.schedule_recommendation_refresh()
         with self._background_lock:
             snapshot = deepcopy(self._recommendation_snapshot)
         if not snapshot or not isinstance(snapshot.get("result"), dict):
@@ -1680,6 +1792,7 @@ class JmcomicProvider:
         missing = [source_id for source_id in ordered_ids if not complete(stored_items.get(source_id))]
 
         clients = self._metadata_clients
+        cancel_event = getattr(self._query_cancel_local, "event", None)
 
         def client_for_thread(*, direct: bool = False):
             generation = self._cache_generation
@@ -1697,19 +1810,23 @@ class JmcomicProvider:
             # for the same album are coalesced; unrelated albums never wait on
             # a global metadata lock while network I/O is in progress.
             with self._metadata_fetch_locks[hash(source_id) % len(self._metadata_fetch_locks)]:
+                if cancel_event is not None and cancel_event.is_set():
+                    return source_id, None
                 cached_items = self.database.get_online_metadata([source_id])
                 cached = cached_items[0] if cached_items else None
                 if complete(cached):
                     return source_id, cached
                 try:
-                    with self._query_slot(background=background):
+                    with self._query_slot(background=background, cancel_event=cancel_event):
                         album = client_for_thread().get_album_detail(source_id)
+                except QueryCancelled:
+                    raise
                 except Exception as first_error:
                     if self._proxy_is_explicit():
                         self._record_connection(False, first_error)
                         raise
                     try:
-                        with self._query_slot(background=background):
+                        with self._query_slot(background=background, cancel_event=cancel_event):
                             album = client_for_thread(direct=True).get_album_detail(source_id)
                     except Exception as direct_error:
                         self._record_connection(False, direct_error)
@@ -2131,11 +2248,19 @@ class JmcomicProvider:
         progress_lock = threading.Lock()
         chapter_progress = [0.0] * total_items
         completed_chapters: set[int] = set()
+        stream_progress: dict[str, dict[str, Any]] = {}
 
         def report(item_index: int, fraction: float, phase: str, **extra: Any) -> None:
             if not progress:
                 return
             with progress_lock:
+                stream_id = str(extra.get("activeSourceId") or "")
+                if extra.get("streamReady") and stream_id:
+                    previous = stream_progress.get(stream_id, {})
+                    if int(extra.get("availablePages") or 0) < int(previous.get("availablePages") or 0):
+                        extra.update(previous)
+                    else:
+                        stream_progress[stream_id] = dict(extra)
                 chapter_progress[item_index] = max(chapter_progress[item_index], min(1.0, fraction))
                 if fraction >= 1:
                     completed_chapters.add(item_index)
@@ -2398,19 +2523,12 @@ class JmcomicProvider:
                             expectedPages=len(photo),
                         )
                     if remaining:
-                        # Four-page batches keep request bursts short and make
-                        # completed groups reach the reader at a steady cadence
-                        # instead of waiting behind a congested 12-page burst.
-                        tail_batch_size = 4 if leading_count > 0 else len(remaining)
-                        for offset in range(0, len(remaining), tail_batch_size):
-                            if cancel_event is not None and cancel_event.is_set():
-                                raise RuntimeError("在线预览已取消")
-                            batch = remaining[offset:offset + tail_batch_size]
-                            self.execute_on_condition(
-                                iter_objs=batch,
-                                apply=self.download_by_image_detail,
-                                count_batch=max(1, min(image_workers, len(batch))),
-                            )
+                        from jmcomic.jm_task_context import bind_jm_task_context
+                        _load_image_window(
+                            remaining, bind_jm_task_context(self.download_by_image_detail),
+                            workers=max(1, min(8 if foreground or transfer_priority == "reader_next" else image_workers, 8, len(remaining))),
+                            cancel_event=cancel_event,
+                        )
                     self.after_photo(photo)
 
                 def before_photo(self, photo):
@@ -2437,7 +2555,8 @@ class JmcomicProvider:
                     priority = (
                         "preview"
                         if foreground_head
-                        else "streaming" if transfer_priority == "reader_next" and not streaming
+                        else "streaming" if provider_owner._reader_source_id == str(photo_id)
+                        else "streaming" if transfer_priority == "reader_next"
                         else "streaming" if foreground and streaming
                         else "visible" if transfer_priority == "visible" else "background"
                     )

@@ -130,9 +130,13 @@ class LibraryDatabase:
             "actors_json": "TEXT NOT NULL DEFAULT '[]'",
         }
         storage_kind_was_added = "storage_kind" not in existing_columns
+        extra_columns["storage_complete"] = "INTEGER NOT NULL DEFAULT 0"
         for name, definition in extra_columns.items():
             if name not in existing_columns:
                 self.connection.execute(f"ALTER TABLE comics ADD COLUMN {name} {definition}")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_comics_series_id ON comics(series_id)")
+        if "storage_complete" not in existing_columns:
+            self.connection.execute("UPDATE comics SET storage_complete = 1 WHERE root_path IS NOT NULL AND root_path != '' AND storage_kind IN ('local', 'download')")
         if storage_kind_was_added:
             self.connection.execute(
                 "UPDATE comics SET storage_kind = 'remote' WHERE root_path IS NULL AND source_id IS NOT NULL"
@@ -214,6 +218,7 @@ class LibraryDatabase:
             "seriesTitle": row["series_title"] or "",
             "chapterIndex": row["chapter_index"] or 1,
             "rootPath": row["root_path"],
+            "storageComplete": bool(row["storage_complete"]),
             "coverPath": row["cover_path"],
             "storageKind": row["storage_kind"] if row["storage_kind"] in {"local", "download", "cache", "remote"} else "local",
             "coverPrivacyEnabled": bool(row["cover_privacy_enabled"]),
@@ -260,6 +265,23 @@ class LibraryDatabase:
             row = self.connection.execute("SELECT id FROM comics WHERE source_id = ?", (str(source_id),)).fetchone()
         return self.get_comic(row["id"]) if row else None
 
+    def get_comics_by_sources(self, source_ids: list[str]) -> list[dict[str, Any]]:
+        ids = list(dict.fromkeys(str(value) for value in source_ids if value))
+        found: dict[str, dict[str, Any]] = {}
+        with self.lock:
+            for offset in range(0, len(ids), 400):
+                batch = ids[offset:offset + 400]
+                marks = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    self._comic_select() + f" WHERE c.source_id IN ({marks}) OR c.series_id IN ({marks})",
+                    [*batch, *batch],
+                ).fetchall()
+                for row in rows:
+                    comic = self._comic(row)
+                    if comic:
+                        found[comic["id"]] = comic
+        return list(found.values())
+
     def get_next_source_series_member(self, comic_id: str) -> dict[str, Any] | None:
         """Return the next chapter only when the comic belongs to a native JM source series."""
         with self.lock:
@@ -294,7 +316,7 @@ class LibraryDatabase:
             saved = existing.get("storageKind") in {"local", "download"}
             if incoming_kind == "remote" or (incoming_kind == "cache" and saved):
                 data = {**data, **{key: existing[key] for key in (
-                    "rootPath", "storageKind", "coverPath", "pageCount",
+                    "rootPath", "storageKind", "coverPath", "pageCount", "storageComplete",
                 )}}
         comic_id = existing["id"] if existing else str(uuid.uuid4())
         timestamp = now_iso()
@@ -336,6 +358,7 @@ class LibraryDatabase:
             "rootPath": root_path,
             "coverPath": value("coverPath", None),
             "storageKind": storage_kind,
+            "storageComplete": bool(root_path) and bool(value("storageComplete", storage_kind in {"local", "download"})),
             "coverPrivacyEnabled": bool(value("coverPrivacyEnabled", True)),
             "coverPrivacyDirection": privacy_direction,
             "coverPrivacyStart": max(15, min(85, privacy_start)),
@@ -354,8 +377,8 @@ class LibraryDatabase:
                   id, source_id, title, nickname, authors_json, tags_json, works_json, actors_json, note, description,
                   published_at, source_updated_at, chapters_json, series_id, series_title, chapter_index,
                   root_path, cover_path, storage_kind, cover_privacy_enabled, cover_privacy_direction, cover_privacy_start, page_count,
-                  progress_page, source_status, source_error, created_at, updated_at, last_read_at, read_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  progress_page, source_status, source_error, created_at, updated_at, last_read_at, read_count, storage_complete
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   source_id=excluded.source_id, title=excluded.title, nickname=excluded.nickname,
                   authors_json=excluded.authors_json, tags_json=excluded.tags_json,
@@ -372,7 +395,7 @@ class LibraryDatabase:
                   page_count=excluded.page_count,
                   progress_page=excluded.progress_page, source_status=excluded.source_status,
                   source_error=excluded.source_error, updated_at=excluded.updated_at, last_read_at=excluded.last_read_at,
-                  read_count=excluded.read_count
+                  read_count=excluded.read_count, storage_complete=excluded.storage_complete
                 """,
                 (
                     fields["id"], fields["sourceId"], fields["title"], fields["nickname"],
@@ -384,6 +407,7 @@ class LibraryDatabase:
                     int(fields["coverPrivacyEnabled"]), fields["coverPrivacyDirection"], fields["coverPrivacyStart"],
                     fields["pageCount"], fields["progressPage"], fields["sourceStatus"], fields["sourceError"],
                     fields["createdAt"], timestamp, fields["lastReadAt"], fields["readCount"],
+                    int(fields["storageComplete"]),
                 ),
             )
             self.connection.commit()

@@ -30,6 +30,7 @@ class DownloadQueue:
         retain: int = 40,
         workers: int = 2,
         state_path: Path | None = None,
+        reserve_reader: bool = False,
     ) -> None:
         self.handler = handler
         self.retain = max(10, retain)
@@ -40,6 +41,7 @@ class DownloadQueue:
         self._closing = threading.Event()
         self._workers: list[threading.Thread] = []
         self._worker_count = max(1, min(4, workers))
+        self._reserve_reader = reserve_reader
         self._state_path = state_path.resolve() if state_path else None
         self._persist_interval = 0.75
         self._last_persist_at = 0.0
@@ -55,6 +57,10 @@ class DownloadQueue:
             return
         for index in range(self._worker_count):
             worker = threading.Thread(target=self._run, name=f"jmshelf-downloads-{index}", daemon=True)
+            self._workers.append(worker)
+            worker.start()
+        if self._reserve_reader:
+            worker = threading.Thread(target=self._run, kwargs={"reader_only": True}, name="jmshelf-reader-cache", daemon=True)
             self._workers.append(worker)
             worker.start()
 
@@ -165,27 +171,24 @@ class DownloadQueue:
                 "queuedCount": len(queued_ids),
             }
 
-    def prioritize(self, task_id: str) -> bool:
+    def prioritize(self, task_id: str, *, reader: bool = True) -> bool:
         """Move a queued task to the front without duplicating queue work."""
         with self._lock:
             task = self._tasks.get(task_id)
             if not task or task.get("status") != "queued":
                 return False
-        # queue.Queue has no public reordering API. Reordering its protected
-        # deque under the queue mutex preserves unfinished-task accounting and
-        # keeps workers from observing the container midway through the move.
-        with self._pending.mutex:
-            try:
-                self._pending.queue.remove(task_id)
-            except ValueError:
-                return False
-            self._pending.queue.appendleft(task_id)
-            self._pending.not_empty.notify()
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task and task.get("status") == "queued":
+            with self._pending.mutex:
+                try:
+                    self._pending.queue.remove(task_id)
+                except ValueError:
+                    return False
                 task["queuePriority"] = "normal"
-                self._persist_locked()
+                if self._reserve_reader and reader:
+                    task["context"] = task.get("context") or {}
+                    task["context"]["readerForeground"] = True
+                self._pending.queue.appendleft(task_id)
+                self._pending.not_empty.notify_all()
+            self._persist_locked()
         return True
 
     def retry(self, task_id: str) -> tuple[dict[str, Any], bool]:
@@ -324,9 +327,24 @@ class DownloadQueue:
                 # durable snapshot.
                 self._persist_locked(force=False)
 
-    def _run(self) -> None:
+    def _take_reader_task(self) -> str | None:
+        # The extra worker never takes speculative background chapters. It can
+        # start a clicked chapter while both regular workers finish older work.
+        with self._pending.not_empty:
+            while not self.closing:
+                for task_id in self._pending.queue:
+                    task = self._tasks.get(str(task_id), {})
+                    context = task.get("context") or {}
+                    if context.get("readerForeground"):
+                        self._pending.queue.remove(task_id)
+                        self._pending.not_full.notify()
+                        return str(task_id)
+                self._pending.not_empty.wait(.2)
+        return None
+
+    def _run(self, *, reader_only: bool = False) -> None:
         while True:
-            task_id = self._pending.get()
+            task_id = self._take_reader_task() if reader_only else self._pending.get()
             if task_id is None or self.closing:
                 return
             with self._lock:

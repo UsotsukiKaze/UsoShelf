@@ -247,7 +247,7 @@ def test_context_menus_status_copy_and_prominent_delete_controls_are_present() -
     assert "清除系列缓存" in javascript
     assert "'/api/caches'" in javascript
     assert "'/api/caches/clear'" in javascript
-    assert "cacheComics(comics, { notify: false })" in javascript
+    assert "cacheComics(comics.slice(0, 2), { notify: false, progressive: true })" in javascript
     assert "remoteFavorite || !state.settings.sanityMode" in javascript
     assert 'id="detail-cover-privacy-settings"' in html
 

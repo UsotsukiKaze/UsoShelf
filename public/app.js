@@ -1,5 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const onlineRequestPrefix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 // The backend file survives the desktop server's changing localhost port.
 let uiPreferenceValues = null;
@@ -75,6 +76,11 @@ const state = {
     homeLoaded: false,
     homeReason: '',
     homePollTimer: null,
+    homeCheckedAt: 0,
+    queryController: null,
+    queryToken: '',
+    metadataControllers: new Map(),
+    metadataRevision: 0,
     browseCategory: null,
     metadataLoading: new Set(),
     metadataQueued: new Set(),
@@ -375,6 +381,31 @@ async function api(url, options = {}) {
   return data;
 }
 
+function cancelOnlineQueries() {
+  const tokens = [state.online.queryToken, ...state.online.metadataControllers.keys()].filter(Boolean);
+  state.online.queryController?.abort();
+  state.online.queryController = null;
+  state.online.queryToken = '';
+  state.online.metadataControllers.forEach((controller) => controller.abort());
+  state.online.metadataControllers.clear();
+  state.online.metadataRevision += 1;
+  state.online.metadataLoading.clear();
+  state.online.metadataActive = 0;
+  state.online.metadataQueue = [];
+  state.online.metadataQueued.clear();
+  state.online.metadataObserver?.disconnect();
+  tokens.forEach((requestToken) => api('/api/online/cancel', { method: 'POST', body: { requestToken } }).catch(() => {}));
+}
+
+function beginOnlineQuery(requestId) {
+  cancelOnlineQueries();
+  const controller = new AbortController();
+  const requestToken = `${onlineRequestPrefix}-query-${requestId}`;
+  state.online.queryController = controller;
+  state.online.queryToken = requestToken;
+  return { signal: controller.signal, requestToken };
+}
+
 function setActivityFocus(scope, comicId = '', previewAlbumId = '') {
   api('/api/activity/focus', { method: 'POST', body: { scope, comicId, previewAlbumId } }).catch(() => {});
 }
@@ -555,7 +586,7 @@ function remoteOnlineComic(item) {
   };
 }
 
-async function loadJmFavorites({ refresh = false } = {}) {
+async function loadJmFavorites({ refresh = false, page = 1 } = {}) {
   if (!state.provider?.authenticated) {
     state.jmFavoritesRequestId += 1;
     state.jmFavorites = null;
@@ -568,11 +599,49 @@ async function loadJmFavorites({ refresh = false } = {}) {
   }
   const requestId = ++state.jmFavoritesRequestId;
   const params = new URLSearchParams();
+  params.set('page', String(page));
   const search = $('#search-input').value.trim();
   if (search) params.set('search', search);
   if (refresh) params.set('refresh', 'true');
-  const favorites = await api(`/api/provider/favorites?${params}`);
+  const moreButton = $('#jm-favorites-more');
+  setBusy(moreButton, true, '加载中…');
+  let favorites;
+  try {
+    favorites = await api(`/api/provider/favorites?${params}`);
+  } finally {
+    setBusy(moreButton, false);
+  }
   if (requestId === state.jmFavoritesRequestId) {
+    if (!refresh && state.jmFavorites?.username === favorites.username && state.jmFavorites?.searchQuery === search) {
+      const previous = state.jmFavorites;
+      if (page === 1 && previous.page > 1) {
+        favorites.page = previous.page;
+        favorites.hasMore = previous.hasMore;
+      }
+      for (const [key, id] of [['items', 'albumId'], ['remoteItems', 'albumId'], ['localComics', 'id']]) {
+        favorites[key] = [...new Map([...(previous[key] || []), ...(favorites[key] || [])].map((item) => [item[id], item])).values()];
+      }
+    }
+    favorites.searchQuery = search;
+    const localComics = await api('/api/provider/favorites/state', {
+      method: 'POST', body: { albumIds: (favorites.items || []).map((item) => item.albumId) },
+    });
+    if (requestId !== state.jmFavoritesRequestId) return favorites;
+    const localSources = new Set(localComics.flatMap((comic) => [String(comic.sourceId || ''), String(comic.seriesId || '')]));
+    const localTitles = new Map();
+    localComics.forEach((comic) => {
+      new Set([String(comic.sourceId || ''), String(comic.seriesId || '')]).forEach((sourceId) => {
+        if (!sourceId) return;
+        if (!localTitles.has(sourceId)) localTitles.set(sourceId, []);
+        localTitles.get(sourceId).push(comic.displayName || '');
+      });
+    });
+    const query = search.toLocaleLowerCase();
+    const visibleItems = (favorites.items || []).filter((item) => !query || [item.albumId, item.title, ...(item.authors || []), ...(item.tags || []),
+      ...(localTitles.get(String(item.albumId)) || [])].join(' ').toLocaleLowerCase().includes(query));
+    const visibleIds = new Set(visibleItems.map((item) => String(item.albumId)));
+    favorites.localComics = localComics.filter((comic) => visibleIds.has(String(comic.sourceId)) || visibleIds.has(String(comic.seriesId)));
+    favorites.remoteItems = visibleItems.filter((item) => !localSources.has(String(item.albumId)));
     state.jmFavorites = favorites;
     $('#jm-favorites-count').textContent = favorites.total ?? favorites.items?.length ?? 0;
     if (state.activeCollection === 'jm-favorites') {
@@ -763,11 +832,16 @@ function needsOnlineMetadata(comic) {
 }
 
 async function hydrateOnlineMetadataOne(sourceId, priority) {
+  const revision = state.online.metadataRevision;
+  const requestToken = `${onlineRequestPrefix}-metadata-${sourceId}-${Date.now()}`;
+  const controller = new AbortController();
+  state.online.metadataControllers.set(requestToken, controller);
   try {
     const response = await api('/api/online/metadata', {
       method: 'POST',
-      body: { albumIds: [sourceId], priority },
+      body: { albumIds: [sourceId], priority, requestToken }, signal: controller.signal,
     });
+    if (!(response.items || []).some((item) => item.metadataFresh ?? item.detailsComplete)) throw new Error('信息暂不可用');
     for (const metadata of response.items || []) {
       const resolvedSourceId = String(metadata.albumId || sourceId);
       for (const comic of onlineItems()) {
@@ -809,15 +883,27 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
       }
     }
     if (state.online.excludedRecommendationTags.length) renderOnlineRecommendations();
-  } catch (_) {
+  } catch (error) {
+    if (error.name === 'AbortError') return;
     for (const comic of onlineItems()) {
-      if (String(comic.sourceId) === sourceId) comic.metadataFailed = true;
+      if (String(comic.sourceId) === sourceId) {
+        comic.metadataFailed = true;
+        comic.metadataRetries = (comic.metadataRetries || 0) + 1;
+      }
     }
     $$(`[data-online-id="${sourceId}"] .online-date`).forEach((node) => { node.textContent = '日期暂不可用'; });
     $$(`[data-online-tags="${sourceId}"]`).forEach((node) => {
       node.innerHTML = '<span>标签暂不可用</span>';
       node.classList.remove('is-loading');
     });
+    const retry = onlineItems().find((comic) => String(comic.sourceId) === sourceId);
+    if (retry && retry.metadataRetries <= 2) setTimeout(() => {
+      if (revision !== state.online.metadataRevision || state.activeCollection !== 'jm-online') return;
+      onlineItems().filter((comic) => String(comic.sourceId) === sourceId).forEach((comic) => { comic.metadataFailed = false; });
+      queueOnlineMetadata(sourceId, priority);
+    }, retry.metadataRetries * 2000);
+  } finally {
+    state.online.metadataControllers.delete(requestToken);
   }
 }
 
@@ -828,7 +914,9 @@ function pumpOnlineMetadataQueue() {
     if (!onlineItems().some((comic) => String(comic.sourceId) === task.sourceId && needsOnlineMetadata(comic))) continue;
     state.online.metadataActive += 1;
     state.online.metadataLoading.add(task.sourceId);
+    const revision = state.online.metadataRevision;
     hydrateOnlineMetadataOne(task.sourceId, task.priority).finally(() => {
+      if (revision !== state.online.metadataRevision) return;
       state.online.metadataLoading.delete(task.sourceId);
       state.online.metadataActive = Math.max(0, state.online.metadataActive - 1);
       pumpOnlineMetadataQueue();
@@ -900,6 +988,7 @@ function renderOnlineRecommendations() {
       ? (state.online.excludedRecommendationTags.length ? '没有符合当前标签过滤的推荐' : '暂时没有更多推荐')
       : '暂无推荐');
   $('#online-refresh-recommendations').disabled = state.online.recommendationLoading;
+  $('#online-rebuild-recommendations').disabled = state.online.recommendationLoading;
   $('#online-recommendation-sort').disabled = state.online.recommendationLoading;
   bindOnlineImages($('#online-recommend-grid'));
   renderRecommendationTagFilter();
@@ -1017,13 +1106,14 @@ function renderOnlineHome() {
 }
 
 async function loadOnlineHome({ poll = false } = {}) {
-  if (state.online.homeLoaded && !poll) return;
+  if (state.online.homeLoaded && !poll && Date.now() - state.online.homeCheckedAt < 60_000) return;
   if (state.online.homeLoading) return;
   state.online.homeLoading = true;
   renderOnlineHome();
   try {
     const response = await api('/api/online/home');
     state.online.homeLoaded = true;
+    state.online.homeCheckedAt = Date.now();
     state.online.homeUpdatedAt = response.updatedAt || '';
     state.online.homeReason = response.reason || '';
     state.online.homeSections = (response.sections || []).map((section) => ({
@@ -1031,7 +1121,7 @@ async function loadOnlineHome({ poll = false } = {}) {
       items: (section.items || []).map(remoteOnlineComic),
     }));
     clearTimeout(state.online.homePollTimer);
-    if (response.refreshing && !state.online.homeSections.length) {
+    if (response.refreshing && state.activeCollection === 'jm-online') {
       state.online.homePollTimer = setTimeout(() => loadOnlineHome({ poll: true }).catch(() => {}), 2500);
     }
   } catch (error) {
@@ -1045,6 +1135,7 @@ async function loadOnlineHome({ poll = false } = {}) {
 async function browseOnlineCategory(category, page = 1) {
   const selected = Object.prototype.hasOwnProperty.call(ONLINE_CATEGORY_LABELS, category) ? category : 'all';
   const requestId = (state.online.requestId || 0) + 1;
+  const request = beginOnlineQuery(requestId);
   state.online.requestId = requestId;
   state.online.browseCategory = selected;
   state.online.loading = true;
@@ -1064,9 +1155,10 @@ async function browseOnlineCategory(category, page = 1) {
     category: selected,
     sort: $('#online-category-sort').value,
     timeRange: ['all', 'today', 'week', 'month'].includes(selectedTime) ? selectedTime : 'all',
+    requestToken: request.requestToken,
   });
   try {
-    const response = await api(`/api/online/categories?${params}`);
+    const response = await api(`/api/online/categories?${params}`, { signal: request.signal });
     if (requestId !== state.online.requestId) return;
     state.online.response = response;
     state.online.results = (response.items || []).map(remoteOnlineComic);
@@ -1109,7 +1201,7 @@ function rerunOnlineResults() {
   return loadOnlinePage(1);
 }
 
-async function loadOnlineRecommendations({ refresh = false, poll = false } = {}) {
+async function loadOnlineRecommendations({ refresh = false, poll = false, rebuild = false } = {}) {
   if (state.online.recommendationLoaded && !refresh && !poll) return;
   if (state.online.recommendationLoading) return;
   if (refresh) state.online.recommendationBatch += 1;
@@ -1124,6 +1216,7 @@ async function loadOnlineRecommendations({ refresh = false, poll = false } = {})
       batch: String(state.online.recommendationBatch),
       sort: state.online.recommendationSort,
     });
+    if (rebuild) params.set('refresh', 'true');
     state.online.excludedRecommendationTags.forEach((tag) => params.append('excludeTag', tag));
     const response = await api(`/api/online/recommendations?${params}`);
     state.online.recommendationLoaded = true;
@@ -1161,6 +1254,7 @@ async function searchOnline(page = 1) {
     return toast('请输入在线搜索关键词', 'error');
   }
   const requestId = (state.online.requestId || 0) + 1;
+  const request = beginOnlineQuery(requestId);
   state.online.browseCategory = null;
   renderOnlineCategorySelection();
   setOnlineView('search');
@@ -1179,13 +1273,14 @@ async function searchOnline(page = 1) {
     sort: $('#online-sort').value,
     timeRange: $('#online-time').value,
     category: $('#online-category').value,
+    requestToken: request.requestToken,
   });
   if ($('#online-time').value === 'custom') {
     if ($('#online-date-from').value) params.set('dateFrom', $('#online-date-from').value);
     if ($('#online-date-to').value) params.set('dateTo', $('#online-date-to').value);
   }
   try {
-    const response = await api(`/api/online/search?${params}`);
+    const response = await api(`/api/online/search?${params}`, { signal: request.signal });
     if (requestId !== state.online.requestId) return;
     state.online.response = response;
     state.online.results = (response.items || []).map(remoteOnlineComic);
@@ -1631,6 +1726,7 @@ function renderLibrary() {
   $('#empty-state h2').textContent = favoritesSignedOut ? '登录后查看 JM 收藏' : (allItemCount ? '这个分类还没有本子' : '书架还是空的');
   $('#empty-state p').textContent = favoritesSignedOut ? '请从左下角登录 JM 账号，登录成功后会读取账号收藏。' : (allItemCount ? '选择其他类型，或清除搜索条件后再看看。' : '导入一个本子目录，或输入车牌从信息源建立条目。');
   $('#result-count').textContent = `${itemCount} 本`;
+  $('#jm-favorites-more').classList.toggle('hidden', state.activeCollection !== 'jm-favorites' || !state.jmFavorites?.hasMore);
   $('#all-count').textContent = state.activeCollection ? '—' : allItemCount;
   $('#view-title').textContent = currentCollectionName();
   $$('.library-filter-button').forEach((button) => {
@@ -1924,7 +2020,7 @@ async function addQueryResult(index = null) {
       comics.push(await api('/api/comics', { method: 'POST', body: { ...item, sourceStatus: 'matched' } }));
     }
     let cacheError = null;
-    try { await cacheComics(comics, { notify: false }); }
+    try { await cacheComics(comics.slice(0, 2), { notify: false, progressive: true }); }
     catch (error) { cacheError = error; }
     closeModal('query-dialog');
     await Promise.all([loadLibrary(), loadSeries()]);
@@ -2166,6 +2262,7 @@ function updateReaderLoadingMessage(message) {
 
 function showReaderLoading(comic, message, { preview = false } = {}) {
   stopReaderLoadingMotion();
+  setActivityFocus(preview ? 'preview' : 'library', preview ? '' : comic.id, preview ? state.readerPreviewAlbumId : '');
   closeDetail();
   state.readerPendingComic = comic;
   state.readerComic = null;
@@ -2282,6 +2379,10 @@ function startPreviewStreamUpdates(comic, albumId) {
       return;
     }
     comic.pageCount = Math.max(Number(comic.pageCount || 0), Number(response.pageCount || 0));
+    const rawPages = response.pages || [];
+    const visibleCount = response.status === 'ready' || rawPages.length >= comic.pageCount
+      ? rawPages.length : Math.floor(rawPages.length / 4) * 4;
+    response.pages = rawPages.slice(0, visibleCount);
     if ((response.pages || []).length >= state.readerPages.length) {
       if ((response.pages || []).length > state.readerPages.length) interval = 240;
       appendReaderPages(comic, response.pages || [], { preview: true });
@@ -3352,6 +3453,14 @@ async function selectCollection(collectionId) {
   if (!wasOnline) state.librarySearch = $('#search-input').value;
   state.activeCollection = collectionId;
   const isOnline = collectionId === 'jm-online';
+  if (wasOnline && !isOnline) {
+    state.online.requestId = (state.online.requestId || 0) + 1;
+    cancelOnlineQueries();
+    state.online.loading = false;
+    setBusy($('#online-submit'), false);
+    clearTimeout(state.online.homePollTimer);
+    clearTimeout(state.online.recommendationPollTimer);
+  }
   setActivityFocus(isOnline ? 'online' : 'library');
   renderQuickAction();
   $('#library-section').classList.toggle('hidden', isOnline);
@@ -3364,7 +3473,7 @@ async function selectCollection(collectionId) {
     renderCollections();
     if (!wasOnline) replayAnimation($('#online-section'), 'is-online-section-entering');
     loadProvider({ probe: true }).catch(() => {});
-    loadOnlineRecommendations().catch(() => {});
+    loadOnlineRecommendations({ poll: true }).catch(() => {});
     loadOnlineHome().catch(() => {});
     return;
   }
@@ -4004,6 +4113,8 @@ $$('[data-online-token]').forEach((button) => button.addEventListener('click', (
 $('#online-prev').addEventListener('click', () => loadOnlinePage(Math.max(1, Number(state.online.response?.page || 1) - 1)));
 $('#online-next').addEventListener('click', () => loadOnlinePage(Number(state.online.response?.page || 1) + 1));
 $('#online-refresh-recommendations').addEventListener('click', () => loadOnlineRecommendations({ refresh: true }));
+$('#online-rebuild-recommendations').addEventListener('click', () => loadOnlineRecommendations({ rebuild: true, poll: true }));
+$('#jm-favorites-more').addEventListener('click', () => loadJmFavorites({ page: (state.jmFavorites?.page || 1) + 1 }).catch((error) => toast(`收藏读取失败：${error.message}`, 'error')));
 $('#online-exclude-tags-toggle').addEventListener('click', () => {
   const panel = $('#online-exclude-tags-panel');
   const open = panel.classList.contains('hidden');

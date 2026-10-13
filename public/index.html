@@ -103,6 +103,7 @@
           </div>
         </div>
         <div id="comic-grid" class="comic-grid"></div>
+        <button id="jm-favorites-more" type="button" class="button ghost hidden">加载更多收藏</button>
         <div id="empty-state" class="empty-state hidden">
           <div class="empty-glyph"><img src="/ukp.png" alt=""></div>
           <h2>书架还是空的</h2>
@@ -120,6 +121,7 @@
               <span id="online-recommendation-seed" class="online-seed">正在加载…</span>
               <button id="online-exclude-tags-toggle" type="button" class="button ghost" aria-expanded="false"><span class="icon icon-tag" aria-hidden="true"></span><span>排除标签</span><b id="online-exclude-tags-count" class="hidden">0</b></button>
               <button id="online-refresh-recommendations" type="button" class="button ghost"><span class="icon icon-refresh" aria-hidden="true"></span>换一批</button>
+              <button id="online-rebuild-recommendations" type="button" class="button ghost">更新推荐</button>
             </div>
           </div>
           <div id="online-exclude-tags-panel" class="online-exclude-tags-panel hidden">

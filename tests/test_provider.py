@@ -778,7 +778,10 @@ def test_preview_download_fetches_metadata_concurrently_and_streams_four_page_he
         for patch, _page_count in progress_events
         if patch.get("streamReady")
     ]
-    assert visible_counts == [4, 5, 6, 7, 8]
+    # Tail workers may finish out of order; only the contiguous prefix is
+    # readable and published progress must never move backwards.
+    assert visible_counts[0] == 4 and visible_counts[-1] == 8
+    assert visible_counts == sorted(visible_counts)
     assert ("photo", False, False) in metadata_calls
     assert ("scramble",) in metadata_calls
     assert max(hedge_gate_counts) >= 2
