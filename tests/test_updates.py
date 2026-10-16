@@ -12,7 +12,7 @@ class StubProvider:
         self.calls: list[str] = []
         self.fresh_calls: list[bool] = []
 
-    def inspect_series(self, source_id: str, *, fresh: bool = False):
+    def inspect_series(self, source_id: str, *, fresh: bool = False, background: bool = False):
         self.calls.append(source_id)
         self.fresh_calls.append(fresh)
         return {
@@ -78,7 +78,7 @@ def test_failed_remote_check_does_not_claim_series_was_checked() -> None:
     assert series is not None
 
     class FailingProvider(StubProvider):
-        def inspect_series(self, source_id: str, *, fresh: bool = False):
+        def inspect_series(self, source_id: str, *, fresh: bool = False, background: bool = False):
             assert fresh is True
             raise RuntimeError("JM 网络不可用")
 

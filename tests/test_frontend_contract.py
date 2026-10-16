@@ -123,7 +123,7 @@ def test_jmonline_search_recommendations_and_library_sort_are_wired() -> None:
     assert 'value="unread"' in html
     assert "/api/online/search?" in javascript
     assert "/api/online/recommendations?${params}" in javascript
-    assert "metadataActive < 5" in javascript
+    assert "metadataActive < 3" in javascript
     assert "albumIds: [sourceId], priority" in javascript
     assert "IntersectionObserver" in javascript
     assert "rootMargin: '900px 0px'" in javascript

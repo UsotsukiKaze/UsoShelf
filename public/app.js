@@ -543,6 +543,7 @@ function remoteFavoriteComic(item) {
 }
 
 function remoteOnlineComic(item) {
+  const previous = onlineItems().find((comic) => String(comic.sourceId) === String(item.albumId));
   const initialAuthors = item.authors || [];
   const initialTags = item.tags || [];
   return {
@@ -581,6 +582,9 @@ function remoteOnlineComic(item) {
     recommendationReason: item.recommendationReason || '',
     recommendationScore: Number(item.recommendationScore || 0),
     metadataLoaded: Boolean(item.metadataLoaded),
+    metadataFailed: !item.metadataLoaded && Boolean(previous?.metadataFailed),
+    metadataFailedAt: previous?.metadataFailedAt || 0,
+    metadataRetries: previous?.metadataRetries || 0,
     detailLoaded: Boolean(item.metadataLoaded || (initialAuthors.length && initialTags.length)),
     updatedAt: item.updatedAtSource || item.publishedAt || '',
   };
@@ -710,7 +714,7 @@ function onlineCardTemplate(comic, index = 0) {
     </div>
     <h3 class="card-title" title="${escapeHtml(comic.displayName)}">${escapeHtml(comic.displayName)}</h3>
     <div class="card-meta"><span>${escapeHtml(author)}</span><span class="online-date">${escapeHtml(dateLabel)}</span></div>
-    <div class="online-card-tags ${tags ? '' : 'is-loading'}" data-online-tags="${comic.sourceId}">${tags || '<span>标签读取中…</span>'}</div>
+    <div class="online-card-tags ${tags || comic.metadataLoaded || comic.metadataFailed ? '' : 'is-loading'}" data-online-tags="${comic.sourceId}">${tags || `<span>${comic.metadataLoaded ? '暂无标签' : comic.metadataFailed ? '标签暂不可用' : '标签读取中…'}</span>`}</div>
   </article>`;
 }
 
@@ -828,6 +832,10 @@ function removeExcludedRecommendationTag(tag) {
 }
 
 function needsOnlineMetadata(comic) {
+  if (comic?.metadataFailed && Date.now() - (comic.metadataFailedAt || 0) >= 120_000) {
+    comic.metadataFailed = false;
+    comic.metadataRetries = 0;
+  }
   return Boolean(comic?.sourceId && !comic.metadataLoaded && !comic.metadataFailed);
 }
 
@@ -841,6 +849,7 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
       method: 'POST',
       body: { albumIds: [sourceId], priority, requestToken }, signal: controller.signal,
     });
+    if (revision !== state.online.metadataRevision) return;
     if (!(response.items || []).some((item) => item.metadataFresh ?? item.detailsComplete)) throw new Error('信息暂不可用');
     for (const metadata of response.items || []) {
       const resolvedSourceId = String(metadata.albumId || sourceId);
@@ -862,6 +871,7 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
         comic.isSourceSeries = comic.episodeManifest.length > 1;
         comic.metadataLoaded = Boolean(metadata.metadataFresh ?? metadata.detailsComplete);
         comic.metadataFailed = !comic.metadataLoaded;
+        if (comic.metadataLoaded) comic.metadataRetries = 0;
         comic.detailLoaded = comic.metadataLoaded;
       }
       const isSourceSeries = (metadata.episodeManifest || []).length > 1;
@@ -884,10 +894,11 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
     }
     if (state.online.excludedRecommendationTags.length) renderOnlineRecommendations();
   } catch (error) {
-    if (error.name === 'AbortError') return;
+    if (error.name === 'AbortError' || revision !== state.online.metadataRevision) return;
     for (const comic of onlineItems()) {
       if (String(comic.sourceId) === sourceId) {
         comic.metadataFailed = true;
+        comic.metadataFailedAt = Date.now();
         comic.metadataRetries = (comic.metadataRetries || 0) + 1;
       }
     }
@@ -901,14 +912,14 @@ async function hydrateOnlineMetadataOne(sourceId, priority) {
       if (revision !== state.online.metadataRevision || state.activeCollection !== 'jm-online') return;
       onlineItems().filter((comic) => String(comic.sourceId) === sourceId).forEach((comic) => { comic.metadataFailed = false; });
       queueOnlineMetadata(sourceId, priority);
-    }, retry.metadataRetries * 2000);
+    }, retry.metadataRetries * 30_000);
   } finally {
     state.online.metadataControllers.delete(requestToken);
   }
 }
 
 function pumpOnlineMetadataQueue() {
-  while (state.online.metadataActive < 5 && state.online.metadataQueue.length) {
+  while (state.online.metadataActive < 3 && state.online.metadataQueue.length) {
     const task = state.online.metadataQueue.shift();
     state.online.metadataQueued.delete(task.sourceId);
     if (!onlineItems().some((comic) => String(comic.sourceId) === task.sourceId && needsOnlineMetadata(comic))) continue;
@@ -968,7 +979,11 @@ function renderOnlineRecommendations() {
   const visibleItems = items.filter((comic) => !excluded.size || (comic.metadataLoaded
     && !(comic.tags || []).some((tag) => excluded.has(recommendationTagKey(tag)))));
   const profile = state.online.recommendationProfile;
-  $('#online-recommend-grid').innerHTML = visibleItems.map((comic, index) => onlineCardTemplate(comic, index)).join('');
+  const markup = visibleItems.map((comic, index) => onlineCardTemplate(comic, index)).join('');
+  if (state.online.recommendationMarkup !== markup) {
+    $('#online-recommend-grid').innerHTML = markup;
+    state.online.recommendationMarkup = markup;
+  }
   const updatedLabel = formatSnapshotTime(state.online.recommendationUpdatedAt);
   $('#online-recommendation-seed').textContent = profile
     ? `${updatedLabel ? `${updatedLabel} · ` : ''}${state.online.recommendationBatch + 1}/${state.online.recommendationBatchCount}`
@@ -1091,10 +1106,14 @@ function renderOnlineCategorySelection() {
 function renderOnlineHome() {
   const container = $('#online-home-sections');
   const sections = state.online.homeSections;
-  container.innerHTML = sections.map((section) => `<section class="online-ranking-section">
+  const markup = sections.map((section) => `<section class="online-ranking-section">
     <div class="online-ranking-heading"><div><strong>${escapeHtml(section.title)}</strong><small>${escapeHtml(section.subtitle || '')}</small></div></div>
     <div class="online-grid online-ranking-grid">${(section.items || []).map((comic, index) => onlineCardTemplate(comic, index)).join('')}</div>
   </section>`).join('');
+  if (state.online.homeMarkup !== markup) {
+    container.innerHTML = markup;
+    state.online.homeMarkup = markup;
+  }
   const status = $('#online-home-status');
   status.classList.toggle('hidden', sections.length > 0);
   status.textContent = state.online.homeLoading ? '正在加载榜单…' : '暂无榜单';
@@ -1116,10 +1135,14 @@ async function loadOnlineHome({ poll = false } = {}) {
     state.online.homeCheckedAt = Date.now();
     state.online.homeUpdatedAt = response.updatedAt || '';
     state.online.homeReason = response.reason || '';
-    state.online.homeSections = (response.sections || []).map((section) => ({
-      ...section,
-      items: (section.items || []).map(remoteOnlineComic),
-    }));
+    const signature = JSON.stringify(response.sections || []);
+    if (state.online.homeSignature !== signature) {
+      state.online.homeSections = (response.sections || []).map((section) => ({
+        ...section,
+        items: (section.items || []).map(remoteOnlineComic),
+      }));
+      state.online.homeSignature = signature;
+    }
     clearTimeout(state.online.homePollTimer);
     if (response.refreshing && state.activeCollection === 'jm-online') {
       state.online.homePollTimer = setTimeout(() => loadOnlineHome({ poll: true }).catch(() => {}), 2500);
@@ -1228,9 +1251,13 @@ async function loadOnlineRecommendations({ refresh = false, poll = false, rebuil
     state.online.recommendationBatch = Number(response.batch ?? state.online.recommendationBatch);
     state.online.recommendationBatchCount = Math.max(1, Number(response.batchCount || 1));
     state.online.recommendationExcludedCount = Math.max(0, Number(response.excludedCount || 0));
-    state.online.recommendations = (response.items || []).map(remoteOnlineComic);
+    const signature = JSON.stringify(response.items || []);
+    if (state.online.recommendationSignature !== signature) {
+      state.online.recommendations = (response.items || []).map(remoteOnlineComic);
+      state.online.recommendationSignature = signature;
+    }
     clearTimeout(state.online.recommendationPollTimer);
-    if (response.refreshing) {
+    if (response.refreshing && state.activeCollection === 'jm-online') {
       state.online.recommendationPollTimer = setTimeout(() => loadOnlineRecommendations({ poll: true }).catch(() => {}), 2500);
     }
   } catch (error) {
@@ -1474,7 +1501,10 @@ async function loadDownloads({ notify = true } = {}) {
     const previousImported = new Map(state.downloads.map((task) => [task.id, Number(task.importedItems || 0)]));
     const snapshot = await api('/api/downloads');
     state.downloads = snapshot.items || [];
-    renderDownloadQueue();
+    if (JSON.stringify(state.downloads) !== state.downloadSnapshot) {
+      state.downloadSnapshot = JSON.stringify(state.downloads);
+      renderDownloadQueue();
+    }
     if (notify && state.downloadStateReady) {
       const completed = state.downloads.filter((task) => task.status === 'completed' && previous.get(task.id) !== 'completed');
       const failed = state.downloads.filter((task) => task.status === 'failed' && previous.get(task.id) !== 'failed');
@@ -4279,6 +4309,13 @@ document.addEventListener('contextmenu', (event) => {
   }
 });
 
+function pollTaskQueues() {
+  Promise.allSettled([loadDownloads(), loadCaches()]).finally(() => {
+    const active = [...state.downloads, ...state.caches].some((task) => ['queued', 'running'].includes(task.status));
+    setTimeout(pollTaskQueues, active ? 1100 : 10_000);
+  });
+}
+
 async function init() {
   await loadUiPreferences().catch((error) => toast(`偏好读取失败：${error.message}`, 'error'));
   applyTheme(uiStorage.getItem(THEME_STORAGE_KEY) || document.documentElement.dataset.theme, { persist: false });
@@ -4328,8 +4365,7 @@ async function init() {
     toast(`初始化失败：${error.message}`, 'error', 8000);
   }
   setInterval(() => api('/api/heartbeat', { method: 'POST' }).catch(() => {}), 15_000);
-  setInterval(() => loadDownloads().catch(() => {}), 1100);
-  setInterval(() => loadCaches().catch(() => {}), 1100);
+  setTimeout(pollTaskQueues, 1100);
   setTimeout(() => runStartupNetworkTasks(), 450);
   setInterval(() => loadSeries({ onlyIfChanged: true }).catch(() => {}), 60_000);
   api('/api/heartbeat', { method: 'POST' }).catch(() => {});

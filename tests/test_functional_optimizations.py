@@ -88,7 +88,9 @@ def test_recommendation_expiry_and_behavior_changes_trigger_refresh(tmp_path: Pa
     db = LibraryDatabase()
     provider = JmcomicProvider(db, tmp_path)
     comic = db.upsert_comic({"sourceId": "701", "pageCount": 40})
-    provider._background_stop.set()  # Inspect scheduling without making remote requests.
+    def build_snapshot(**_kwargs):
+        provider._recommendations_cache = (time.monotonic(), (), {"items": []})
+    provider.recommendations = build_snapshot
     snapshot = {"schemaVersion": 3, "sourceIds": ["701"], "result": {"items": []},
                 "behaviorKey": provider._recommendation_behavior_key()}
     try:
@@ -96,7 +98,7 @@ def test_recommendation_expiry_and_behavior_changes_trigger_refresh(tmp_path: Pa
         assert not provider.schedule_recommendation_refresh()["refreshing"]
         provider._recommendation_snapshot["updatedAt"] = (datetime.now(UTC) - timedelta(days=1, seconds=1)).isoformat()
         assert provider.schedule_recommendation_refresh()["refreshing"]
-        provider.close()
+        provider._background_threads[-1].join(timeout=2)
         db.record_comic_open(comic["id"])
         provider._recommendation_snapshot = {**snapshot, "updatedAt": (datetime.now(UTC) - timedelta(minutes=16)).isoformat()}
         assert provider.schedule_recommendation_refresh()["refreshing"]

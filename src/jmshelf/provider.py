@@ -353,6 +353,9 @@ class JmcomicProvider:
         self._login_restore_error = ""
         self._metadata_fetch_locks = [threading.Lock() for _ in range(64)]
         self._metadata_clients = threading.local()
+        self._html_domain_lock = threading.Lock()
+        self._html_discovery_retry_at = 0.0
+        self._metadata_failures: OrderedDict[str, float] = OrderedDict()
         self._cover_clients = threading.local()
         self._background_lock = threading.Lock()
         self._background_stop = threading.Event()
@@ -365,6 +368,8 @@ class JmcomicProvider:
         self._preferences = self._read_json_file(self._preferences_store_path) or {}
         self._recommendation_refreshing = False
         self._home_refreshing = False
+        self._home_retry_at = 0.0
+        self._recommendation_retry_at = 0.0
         self._query_gate = _PriorityQueryGate(total_limit=6, background_limit=4)
         self._cover_slots = threading.BoundedSemaphore(4)
         self._thumbnail_slots = threading.BoundedSemaphore(10)
@@ -395,6 +400,9 @@ class JmcomicProvider:
             self._favorites_page_cache.clear()
             self._recommendations_cache = None
             self._search_cache.clear()
+            self._metadata_failures.clear()
+        with self._html_domain_lock:
+            self._html_discovery_retry_at = 0.0
 
     def set_activity_focus(self, scope: str) -> dict[str, Any]:
         selected = scope if scope in {"online", "library", "preview"} else "library"
@@ -531,7 +539,24 @@ class JmcomicProvider:
         if direct and config is not None:
             config.proxies = {}
         timeout = config.get("timeout", 12) if config is not None else 12
-        client = option.new_jm_client(impl="html", timeout=timeout)
+        # jmcomic's implicit HTML discovery creates its own transport, dropping
+        # this application's proxy and timeout. Resolve through our transport
+        # and serialize cold discovery across metadata workers.
+        module = self._module()
+        with self._html_domain_lock:
+            domains = module.JmModuleConfig.DOMAIN_HTML_LIST
+            if not domains:
+                if time.monotonic() < self._html_discovery_retry_at:
+                    raise RuntimeError("JM 网页域名暂不可用，稍后重试")
+                postman_config = deepcopy(option.client.postman.src_dict)
+                postman_config["meta_data"]["timeout"] = timeout
+                postman = module.Postmans.create(data=postman_config)
+                try:
+                    domains = [module.JmModuleConfig.get_html_domain(postman)]
+                except Exception:
+                    self._html_discovery_retry_at = time.monotonic() + 60
+                    raise
+        client = option.new_jm_client(impl="html", timeout=timeout, domain_list=domains)
         if hasattr(client, "retry_times"):
             client.retry_times = min(int(client.retry_times), 1)
         return client
@@ -1530,18 +1555,22 @@ class JmcomicProvider:
             or (age >= 15 * 60 and behavior_key != (self._recommendation_snapshot or {}).get("behaviorKey"))
         )
         with self._background_lock:
-            if not should_refresh or self._recommendation_refreshing:
+            if (not should_refresh or self._recommendation_refreshing
+                or self._background_stop.is_set()
+                or (not force and time.monotonic() < self._recommendation_retry_at)):
                 return {
                     "refreshing": self._recommendation_refreshing,
                     "pendingNewItemCount": pending_count,
                     "threshold": threshold,
                 }
             self._recommendation_refreshing = True
+            self._recommendation_retry_at = time.monotonic() + 60
         if force:
             with self._cache_lock:
                 self._recommendations_cache = None
 
         def worker() -> None:
+            succeeded = False
             try:
                 if delay > 0 and self._background_stop.wait(delay):
                     return
@@ -1564,8 +1593,13 @@ class JmcomicProvider:
                 self._write_json_file(self._recommendation_store_path, payload)
                 with self._background_lock:
                     self._recommendation_snapshot = payload
+                    succeeded = True
+            except Exception:
+                # Preserve the last successful snapshot and retry after cooldown.
+                pass
             finally:
                 with self._background_lock:
+                    self._recommendation_retry_at = 0.0 if succeeded else time.monotonic() + 60
                     self._recommendation_refreshing = False
 
         thread = threading.Thread(target=worker, name="jmonline-profile-refresh", daemon=True)
@@ -1720,11 +1754,15 @@ class JmcomicProvider:
         snapshot_version = int((self._home_snapshot or {}).get("schemaVersion") or 0)
         should_refresh = force or self._home_snapshot is None or snapshot_version < 2 or age >= 6 * 60 * 60
         with self._background_lock:
-            if not should_refresh or self._home_refreshing:
+            if (not should_refresh or self._home_refreshing
+                or self._background_stop.is_set()
+                or (not force and time.monotonic() < self._home_retry_at)):
                 return {"refreshing": self._home_refreshing}
             self._home_refreshing = True
+            self._home_retry_at = time.monotonic() + 60
 
         def worker() -> None:
+            succeeded = False
             try:
                 if delay > 0 and self._background_stop.wait(delay):
                     return
@@ -1736,8 +1774,12 @@ class JmcomicProvider:
                 self._write_json_file(self._home_store_path, payload)
                 with self._background_lock:
                     self._home_snapshot = payload
+                    succeeded = True
+            except Exception:
+                pass
             finally:
                 with self._background_lock:
+                    self._home_retry_at = 0.0 if succeeded else time.monotonic() + 60
                     self._home_refreshing = False
 
         thread = threading.Thread(target=worker, name="jmonline-home-refresh", daemon=True)
@@ -1760,8 +1802,8 @@ class JmcomicProvider:
 
     def start_background_refreshes(self) -> None:
         self.schedule_login_restore()
-        self.schedule_home_refresh(delay=1.5)
-        self.schedule_recommendation_refresh(delay=8.0)
+        # Feeds start on demand when the online view opens. Warming them on
+        # every local-library startup competes with the user's first query.
 
     @staticmethod
     def metadata_is_fresh(metadata: dict[str, Any] | None) -> bool:
@@ -1816,21 +1858,32 @@ class JmcomicProvider:
                 cached = cached_items[0] if cached_items else None
                 if complete(cached):
                     return source_id, cached
+                with self._cache_lock:
+                    if time.monotonic() < self._metadata_failures.get(source_id, 0):
+                        return source_id, cached
                 try:
                     with self._query_slot(background=background, cancel_event=cancel_event):
                         album = client_for_thread().get_album_detail(source_id)
                 except QueryCancelled:
                     raise
                 except Exception as first_error:
-                    if self._proxy_is_explicit():
-                        self._record_connection(False, first_error)
-                        raise
+                    # HTML and API have independent availability. A blocked
+                    # website must not hide tags available from the mobile API.
                     try:
                         with self._query_slot(background=background, cancel_event=cancel_event):
-                            album = client_for_thread(direct=True).get_album_detail(source_id)
+                            album = self._run_query(lambda client: self._get_album_detail(client, source_id))
+                    except QueryCancelled:
+                        raise
                     except Exception as direct_error:
+                        with self._cache_lock:
+                            self._metadata_failures[source_id] = time.monotonic() + 30
+                            self._metadata_failures.move_to_end(source_id)
+                            while len(self._metadata_failures) > 512:
+                                self._metadata_failures.popitem(last=False)
                         self._record_connection(False, direct_error)
                         raise direct_error from first_error
+                with self._cache_lock:
+                    self._metadata_failures.pop(source_id, None)
                 self._record_connection(True)
                 manifest = self._series_manifest(album)
                 episodes = manifest.get("items") or []
@@ -1858,6 +1911,8 @@ class JmcomicProvider:
         if len(missing) == 1:
             try:
                 fetch(missing[0])
+            except QueryCancelled:
+                raise
             except Exception:
                 pass
         elif missing:
@@ -2009,7 +2064,7 @@ class JmcomicProvider:
             metadata["sourceWarning"] = cover_warning
         return metadata
 
-    def inspect_series(self, raw_plate: Any, *, fresh: bool = False) -> dict[str, Any]:
+    def inspect_series(self, raw_plate: Any, *, fresh: bool = False, background: bool = False) -> dict[str, Any]:
         """Fetch a lightweight episode manifest without touching image CDNs."""
         source_id = normalize_plate(raw_plate)
         if not source_id:
@@ -2029,7 +2084,7 @@ class JmcomicProvider:
                     "itemCount": len(cached_manifest),
                     "items": cached_manifest,
                 }
-            with self._query_slot():
+            with self._query_slot(background=background):
                 album = self._run_query(lambda client: self._get_album_detail(client, source_id))
             manifest = self._series_manifest(album)
             items = manifest.get("items") or []

@@ -72,7 +72,7 @@ class SeriesUpdateChecker:
         interval = min(self.check_interval, timedelta(minutes=15)) if series.get("updateError") else self.check_interval
         return now - last_checked.astimezone(UTC) >= interval
 
-    def check(self, series_id: str) -> dict[str, Any]:
+    def check(self, series_id: str, *, background: bool = False) -> dict[str, Any]:
         series = self.database.get_library_series(series_id)
         if not series:
             raise ValueError("未找到系列")
@@ -86,7 +86,7 @@ class SeriesUpdateChecker:
         try:
             # Update checks must query JM, not re-label an old card cache as a
             # successful check and postpone the next attempt for a full day.
-            manifest = self.provider.inspect_series(source_series_id, fresh=True)
+            manifest = self.provider.inspect_series(source_series_id, fresh=True, background=background)
             known_source_ids = {
                 str(member["sourceId"])
                 for member in series.get("members", [])
@@ -127,7 +127,7 @@ class SeriesUpdateChecker:
             if not self.is_due(series):
                 continue
             try:
-                result = self.check(series["id"])
+                result = self.check(series["id"], background=True)
                 self._enqueue_new_items(result)
                 results.append(result)
             except Exception:
@@ -147,7 +147,7 @@ class SeriesUpdateChecker:
             return results
         workers = min(4, len(eligible))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="jmshelf-startup-updates") as executor:
-            futures = {executor.submit(self.check, series["id"]): series for series in eligible}
+            futures = {executor.submit(self.check, series["id"], background=True): series for series in eligible}
             for future in as_completed(futures):
                 if self._closing.is_set():
                     break

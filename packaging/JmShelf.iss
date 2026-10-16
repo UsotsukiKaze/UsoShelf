@@ -1,6 +1,6 @@
 #define MyAppName "JmShelf"
-#define MyAppVersion "1.3.8"
-#define MyAppNumericVersion "1.3.8.0"
+#define MyAppVersion "1.3.9"
+#define MyAppNumericVersion "1.3.9.0"
 #define MyAppPublisher "UsotsukiKaze"
 #define MyAppExeName "JmShelf.exe"
 #define MyAppSourceDir GetEnv("JMSHELF_INSTALLER_SOURCE_DIR")

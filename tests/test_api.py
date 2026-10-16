@@ -977,7 +977,7 @@ def test_multi_chapter_download_is_automatically_grouped_as_library_series(tmp_p
 
 def test_series_refresh_detects_and_queues_only_missing_chapters(tmp_path: Path) -> None:
     app = create_app(tmp_path / "data")
-    app.state.provider.inspect_series = lambda _source_id, *, fresh=False: {
+    app.state.provider.inspect_series = lambda _source_id, *, fresh=False, background=False: {
         "seriesId": "1019294",
         "seriesTitle": "测试系列",
         "itemCount": 3,

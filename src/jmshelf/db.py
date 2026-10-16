@@ -898,12 +898,15 @@ class LibraryDatabase:
         if not prepared:
             return 0
 
-        existing = {
-            item["albumId"]: item
-            for item in self.get_online_metadata(list(prepared))
-        }
         changed = 0
         with self.lock, self.connection:
+            # Read and merge in the same critical section. Otherwise a search
+            # response can overwrite details committed by a hydration worker
+            # between this read and the upsert below.
+            existing = {
+                item["albumId"]: item
+                for item in self.get_online_metadata(list(prepared))
+            }
             for source_id, incoming in prepared.items():
                 current = existing.get(source_id, {})
 
